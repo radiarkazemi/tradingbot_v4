@@ -1,0 +1,665 @@
+"""
+watcher.py — TraderBot v2
+Reads trader_objects_SYMBOL.txt (written by ObjectExporter EA).
+Detects candle touches on trader-drawn lines, delegates to SourceState.
+"""
+from core.position_monitor import SourceState
+from core.order_manager import get_pip_size
+import config as cfg
+import MetaTrader5 as mt5
+import threading
+import time as _time
+import os as _os
+import sys
+import logging
+from dataclasses import dataclass
+from typing import Optional
+from datetime import datetime
+
+sys.path.insert(0, _os.path.dirname(
+    _os.path.dirname(_os.path.abspath(__file__))))
+
+
+log = logging.getLogger("watcher_v2")
+
+# How many consecutive scans a line must be absent before we treat it as deleted.
+# At SCAN_INTERVAL_SEC=2, a grace of 3 = 6 seconds.
+# Prevents spurious resets when the EA rewrites the file mid-scan.
+REMOVAL_GRACE = 3
+
+
+# ── File-bridge helpers ───────────────────────────────────────────
+
+def _get_file_paths(symbol=None):
+    appdata = _os.environ.get("APPDATA", "")
+    paths = []
+    fname_sym = f"trader_objects_{symbol}.txt" if symbol else None
+    fname_gen = "trader_objects.txt"
+
+    common = _os.path.join(appdata, "MetaQuotes",
+                           "Terminal", "Common", "Files")
+    if fname_sym:
+        paths.append(_os.path.join(common, fname_sym))
+    paths.append(_os.path.join(common, fname_gen))
+
+    terminal_root = _os.path.join(appdata, "MetaQuotes", "Terminal")
+    try:
+        if _os.path.isdir(terminal_root):
+            for tid in _os.listdir(terminal_root):
+                t_path = _os.path.join(terminal_root, tid, "MQL5", "Files")
+                if _os.path.isdir(t_path):
+                    if fname_sym:
+                        paths.append(_os.path.join(t_path, fname_sym))
+                    paths.append(_os.path.join(t_path, fname_gen))
+    except Exception:
+        pass
+
+    roaming = _os.path.join(_os.environ.get("USERPROFILE", ""),
+                            "AppData", "Roaming", "MetaQuotes", "Terminal")
+    try:
+        if _os.path.isdir(roaming):
+            for tid in _os.listdir(roaming):
+                t_path = _os.path.join(roaming, tid, "MQL5", "Files")
+                if _os.path.isdir(t_path):
+                    if fname_sym:
+                        paths.append(_os.path.join(t_path, fname_sym))
+                    paths.append(_os.path.join(t_path, fname_gen))
+    except Exception:
+        pass
+
+    return paths
+
+
+def _find_objects_file(symbol=None):
+    syms = [symbol]
+    if symbol:
+        syms.append(symbol[:-2] if symbol.endswith("_i") else symbol + "_i")
+        syms.append(None)
+    best_path, best_age = None, float("inf")
+    for sym in syms:
+        for p in _get_file_paths(sym):
+            if _os.path.exists(p):
+                try:
+                    age = _time.time() - _os.path.getmtime(p)
+                    if age < best_age:
+                        best_age = age
+                        best_path = p
+                except Exception:
+                    if best_path is None:
+                        best_path = p
+    return best_path
+
+
+@dataclass
+class ChartObject:
+    name:     str
+    obj_type: str
+    type_id:  int
+    price1:   float
+    price2:   float
+
+    @property
+    def is_hline(self):
+        return self.obj_type == "HLINE"
+
+    @property
+    def is_rectangle(self):
+        return self.obj_type in ("RECTANGLE",) or self.type_id in (16, 20)
+
+    @property
+    def rect_valid(self):
+        return abs(self.price1 - self.price2) > 1e-8
+
+    @property
+    def rect_top(self):
+        return max(self.price1, self.price2)
+
+    @property
+    def rect_bottom(self):
+        return min(self.price1, self.price2)
+
+
+def _parse_file(path: str):
+    """Returns (objects, candle_dict, file_symbol)."""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except PermissionError:
+        # EA is writing the file at this exact moment — transient, skip silently.
+        return [], {}, None
+    except Exception as e:
+        log.warning("Could not read %s: %s", path, e)
+        return [], {}, None
+
+    candle, file_symbol, objects = {}, None, []
+
+    for line in lines:
+        line = line.strip()
+        if line.startswith("SYMBOL:"):
+            file_symbol = line.split(":", 1)[1].strip()
+        elif line.startswith(("CANDLE_", "PREV_", "BID:")):
+            k, _, v = line.partition(":")
+            try:
+                candle[k] = float(v) if "." in v else int(v)
+            except ValueError:
+                pass
+        elif line.startswith("OBJ"):
+            parts = line.split("|")
+            data = {}
+            for p in parts[1:]:
+                if ":" in p:
+                    k, v = p.split(":", 1)
+                    data[k] = v
+            try:
+                name = data.get("NAME", "?")
+                if any(name.startswith(pfx) for pfx in cfg.AUTO_OBJECT_PREFIXES):
+                    continue
+                objects.append(ChartObject(
+                    name=name,
+                    obj_type=data.get("TYPE", "OTHER"),
+                    type_id=int(data.get("TYPEID", 0)),
+                    price1=float(data.get("PRICE1", 0)),
+                    price2=float(data.get("PRICE2", 0)),
+                ))
+            except Exception:
+                pass
+
+    return objects, candle, file_symbol
+
+
+# ── Signals ───────────────────────────────────────────────────────
+
+class WatcherSignals:
+    def __init__(self):
+        self._log_cbs = []
+        self._status_cbs = []
+        self._state_cbs = []
+        self._candle_cbs = []
+        self._stop_cbs = []   # called when balance TP fires
+
+    def on_log(self, fn):    self._log_cbs.append(fn)
+    def on_status(self, fn): self._status_cbs.append(fn)
+    def on_state(self, fn):  self._state_cbs.append(fn)
+    def on_candle(self, fn): self._candle_cbs.append(fn)
+    def on_stop(self, fn):   self._stop_cbs.append(fn)   # GUI registers here
+
+    def emit_log(self, msg, level="INFO"):
+        for fn in self._log_cbs:
+            fn(msg, level)
+
+    def emit_status(self, msg):
+        for fn in self._status_cbs:
+            fn(msg)
+
+    def emit_state(self, states):
+        for fn in self._state_cbs:
+            fn(states)
+
+    def emit_candle(self, candle):
+        for fn in self._candle_cbs:
+            fn(candle)
+
+    def emit_stop(self):
+        for fn in self._stop_cbs:
+            fn()
+
+
+# ── Watcher Thread ────────────────────────────────────────────────
+
+class WatcherThread(threading.Thread):
+
+    def __init__(self, symbol: str, lot_size: float,
+                 follow_enabled: bool = True, resume_enabled: bool = False,
+                 risk_free_enabled: bool = False, loss_free_enabled: bool = False,
+                 soft_lot_mode: int = 1):
+        super().__init__(daemon=True)
+        self.symbol = symbol
+        self.lot_size = lot_size
+        self.follow_enabled = follow_enabled
+        self._resume_enabled = resume_enabled
+        self._risk_free_enabled = risk_free_enabled
+        self._loss_free_enabled = loss_free_enabled
+        self._soft_lot_mode = soft_lot_mode if soft_lot_mode in (1, 2) else 1
+        self.sig = WatcherSignals()
+        self._stop_event = threading.Event()
+        self._sources: dict[str, SourceState] = {}
+        self._seen:    set = set()
+        self._skipped: set = set()
+
+        # Grace period: name → consecutive absent-scan count.
+        # Rectangle must be missing REMOVAL_GRACE scans before we reset it.
+        self._missing_counts: dict[str, int] = {}
+
+    def set_risk_free_enabled(self, enabled: bool):
+        """
+        Update the R2 risk-free flag live, while the bot is running.
+        Propagates immediately to every currently-tracked SourceState
+        (new sources created after this call already pick up the
+        updated self._risk_free_enabled at construction time, see the
+        SourceState(...) call further down in the scan loop).
+        """
+        self._risk_free_enabled = enabled
+        for state in self._sources.values():
+            state._risk_free_enabled = enabled
+        self.log(
+            f"🛡️  Risk-Free (R2) {'ENABLED' if enabled else 'DISABLED'} "
+            f"({len(self._sources)} active source(s) updated)"
+        )
+
+    def set_loss_free_enabled(self, enabled: bool):
+        """Update the R1 loss-free flag live — see set_risk_free_enabled."""
+        self._loss_free_enabled = enabled
+        for state in self._sources.values():
+            state._loss_free_enabled = enabled
+        self.log(
+            f"🟩  Loss-Free (R1) {'ENABLED' if enabled else 'DISABLED'} "
+            f"({len(self._sources)} active source(s) updated)"
+        )
+
+    def stop(self):
+        self._stop_event.set()
+
+    def _on_balance_tp(self):
+        """
+        Called by SourceState when balance TP is hit.
+        Sets the stop event so the main loop exits cleanly.
+        mt5.shutdown() is handled at the end of run() — not here —
+        so FVG/OB watchers are stopped by the GUI before MT5 closes.
+        """
+        self._stop_event.set()
+        # Tell the GUI to stop all watchers cleanly (FVG, OB, Confluence)
+        self.sig.emit_stop()
+
+    def _save_start_balance(self, path: str, json_mod):
+        try:
+            with open(path, "w") as f:
+                json_mod.dump({"start_balance": self._start_balance,
+                               "symbol": self.symbol}, f)
+        except Exception as e:
+            log.warning("Could not save start balance: %s", e)
+
+    def log(self, msg: str, level: str = "INFO"):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.sig.emit_log(f"{ts}  {msg}", level)
+        getattr(log, "warning" if level == "WARN" else
+                     level.lower() if level.lower() in ("info", "error", "debug") else "info")(msg)
+
+    def run(self):
+        self.log("=" * 60)
+        self.log("  TraderBot v4 — Rectangle-Anchored Recovery Bot")
+        self.log("=" * 60)
+
+        if not self._connect():
+            return
+
+        pip = get_pip_size(self.symbol)
+        self.log(f"Symbol: {self.symbol}  pip={pip:.5f}  "
+                 f"soft_lot_mode={self._soft_lot_mode}  "
+                 f"loss_free={self._loss_free_enabled}  "
+                 f"risk_free={self._risk_free_enabled}")
+
+        # ── Start balance ─────────────────────────────────────────
+        acct = mt5.account_info()
+        current_balance = acct.balance if acct else 0.0
+
+        import json as _json
+        _bal_file = f"start_balance_{self.symbol}.json"
+
+        if self._resume_enabled and _os.path.exists(_bal_file):
+            try:
+                with open(_bal_file) as f:
+                    saved = _json.load(f)
+                saved_bal = saved.get("start_balance", 0.0)
+                if saved_bal > 0:
+                    self._start_balance = saved_bal
+                    self.log(
+                        f"💰  Resumed start balance: {self._start_balance:.2f} | "
+                        f"Current: {current_balance:.2f} | "
+                        f"Target: {self._start_balance * cfg.BALANCE_TP_RATIO:.2f} "
+                        f"(+{(cfg.BALANCE_TP_RATIO - 1) * 100:.0f}%)"
+                    )
+                else:
+                    raise ValueError("invalid saved balance")
+            except Exception:
+                self._start_balance = current_balance
+                self._save_start_balance(_bal_file, _json)
+                self.log(
+                    f"💰  Start balance: {self._start_balance:.2f} | "
+                    f"Target: {self._start_balance * cfg.BALANCE_TP_RATIO:.2f} "
+                    f"(+{(cfg.BALANCE_TP_RATIO - 1) * 100:.0f}%)"
+                )
+        else:
+            self._start_balance = current_balance
+            self._save_start_balance(_bal_file, _json)
+            self.log(
+                f"💰  Start balance: {self._start_balance:.2f} | "
+                f"Target: {self._start_balance * cfg.BALANCE_TP_RATIO:.2f} "
+                f"(+{(cfg.BALANCE_TP_RATIO - 1) * 100:.0f}%)"
+            )
+
+        self.log("⏳  Waiting for ObjectExporter EA file…")
+        self.sig.emit_status("⏳  Waiting for EA…")
+
+        # ── Resume previous session ───────────────────────────────
+        if self._resume_enabled:
+            from core.resume import scan_and_resume
+            recovered = scan_and_resume(
+                symbol=self.symbol,
+                pip_size=pip,
+                base_lot=self.lot_size,
+                start_balance=self._start_balance,
+                risk_free_enabled=self._risk_free_enabled,
+                loss_free_enabled=self._loss_free_enabled,
+                soft_lot_mode=self._soft_lot_mode,
+                log_fn=self.log,
+                stop_fn=self._on_balance_tp,
+            )
+            for name, state in recovered:
+                self._sources[name] = state
+                self._seen.add(name)
+
+        warned_missing = stale_warned = False
+        last_ea_warn = None
+
+        while not self._stop_event.is_set():
+            try:
+                path = _find_objects_file(self.symbol)
+
+                if path is None:
+                    if not warned_missing:
+                        self.log(
+                            "⚠️  trader_objects.txt not found — "
+                            "is ObjectExporter EA running?", "WARN"
+                        )
+                        warned_missing = True
+                    self.sig.emit_status("⏳  Waiting for EA…")
+                    self._stop_event.wait(cfg.SCAN_INTERVAL_SEC)
+                    continue
+
+                warned_missing = False
+
+                try:
+                    file_age = _time.time() - _os.path.getmtime(path)
+                except Exception:
+                    file_age = 0
+
+                if file_age > 15:
+                    if not stale_warned:
+                        self.log(
+                            f"⚠️  EA file {file_age:.0f}s old — EA not running?", "WARN")
+                        stale_warned = True
+                    self.sig.emit_status(f"⚠️  EA stopped ({file_age:.0f}s)")
+                    self._stop_event.wait(cfg.SCAN_INTERVAL_SEC)
+                    continue
+                else:
+                    if stale_warned:
+                        self.log("✅  EA writing again — resuming")
+                    stale_warned = False
+
+                objects, candle, ea_sym = _parse_file(path)
+
+                # _parse_file returns empty on PermissionError — skip silently
+                if objects is None and candle is None:
+                    self._stop_event.wait(cfg.SCAN_INTERVAL_SEC)
+                    continue
+
+                if ea_sym and ea_sym != self.symbol:
+                    if ea_sym != last_ea_warn:
+                        last_ea_warn = ea_sym
+                        self.log(
+                            f"⚠️  EA on '{ea_sym}' — bot watching '{self.symbol}'", "WARN"
+                        )
+                    self.sig.emit_status(f"⚠️  EA on wrong chart ({ea_sym})")
+                    self._stop_event.wait(cfg.SCAN_INTERVAL_SEC)
+                    continue
+
+                last_ea_warn = None
+                self.sig.emit_candle(candle)
+
+                cur_t = candle.get("CANDLE_T", 0)
+                cur_h = candle.get("CANDLE_H", 0.0)
+                cur_l = candle.get("CANDLE_L", 0.0)
+                cur_c = candle.get("CANDLE_C", 0.0)
+                prev_h = candle.get("PREV_H", 0.0)
+                prev_l = candle.get("PREV_L", 0.0)
+                prev_c = candle.get("PREV_C", 0.0)
+                prev_t = candle.get("PREV_T", 0)
+                bid = candle.get("BID", 0.0)
+
+                tick = mt5.symbol_info_tick(self.symbol)
+                current_price = (tick.bid + tick.ask) / \
+                    2 if tick else bid or cur_c
+
+                cur_names = {o.name for o in objects}
+
+                # ── New rectangles (item 1: rectangles only, no lines) ─
+                for o in objects:
+                    n = o.name
+                    if n in self._seen or n in self._skipped:
+                        continue
+
+                    if current_price > 0 and o.price1 > 0:
+                        ratio = o.price1 / current_price
+                        if ratio < 0.5 or ratio > 2.0:
+                            self._skipped.add(n)
+                            continue
+
+                    # Only rectangles register as trade signals now —
+                    # trader-drawn horizontal lines are ignored (item 1).
+                    if not (o.is_rectangle and o.rect_valid):
+                        self._skipped.add(n)
+                        continue
+
+                    state = SourceState(
+                        name=n,
+                        rect_top=o.rect_top,
+                        rect_bottom=o.rect_bottom,
+                        pip_size=pip,
+                        symbol=self.symbol,
+                        base_lot=self.lot_size,
+                        start_balance=self._start_balance,
+                        log_fn=self.log,
+                        stop_fn=self._on_balance_tp,
+                        risk_free_enabled=self._risk_free_enabled,
+                        loss_free_enabled=self._loss_free_enabled,
+                        soft_lot_mode=self._soft_lot_mode,
+                    )
+                    state.registered_at = cur_t
+                    state.last_prev_t = prev_t
+                    # Seed tick price immediately so the first real
+                    # tick after registration can't be misread as a
+                    # "crossing" from an unset baseline.
+                    if tick:
+                        state._prev_tick_price = (tick.bid + tick.ask) / 2
+                    self._sources[n] = state
+                    self._seen.add(n)
+                    self.log(
+                        f"🆕  [{n[:25]}] rect=[{o.rect_bottom:.5f}-{o.rect_top:.5f}] "
+                        f"registered | waiting for touch"
+                    )
+
+                # ── Removed lines (with grace period) ─────────────
+                # A line must be absent for REMOVAL_GRACE consecutive scans
+                # before we reset it. Prevents false resets when the EA
+                # briefly clears the file while rewriting it.
+                for n in list(self._sources.keys()):
+                    if n not in cur_names:
+                        if n.startswith("RESUMED_") or n.startswith("AUTO_"):
+                            continue
+                        self._missing_counts[n] = self._missing_counts.get(
+                            n, 0) + 1
+                        if self._missing_counts[n] >= REMOVAL_GRACE:
+                            self.log(
+                                f"🗑️  [{n[:25]}] removed — cancelling orders")
+                            self._sources[n].reset()
+                            del self._sources[n]
+                            self._seen.discard(n)
+                            self._missing_counts.pop(n, None)
+                        # else: absent within grace — silently wait
+                    else:
+                        # Present this scan — clear any pending removal counter
+                        self._missing_counts.pop(n, None)
+
+                # ── Moved/resized rectangles ───────────────────────
+                # If the trader drags or resizes their rectangle while
+                # it's still IDLE (no orders placed yet), reset and
+                # re-register at the new edges. Rectangles with active
+                # cycles are left alone (the cycle must complete
+                # naturally at its original fixed edges).
+                if self.follow_enabled:
+                    for o in objects:
+                        n = o.name
+                        if n not in self._sources:
+                            continue
+                        if n.startswith("RESUMED_"):
+                            continue
+                        state = self._sources[n]
+                        if state.state != SourceState.IDLE:
+                            continue
+                        if not (o.is_rectangle and o.rect_valid):
+                            continue
+                        if (abs(o.rect_top - state.rect_top) > 1e-6
+                                or abs(o.rect_bottom - state.rect_bottom) > 1e-6):
+                            self.log(
+                                f"↕️  [{n[:25]}] rectangle moved/resized "
+                                f"[{state.rect_bottom:.5f}-{state.rect_top:.5f}]→"
+                                f"[{o.rect_bottom:.5f}-{o.rect_top:.5f}] — resetting"
+                            )
+                            state.reset()
+                            state.rect_top = o.rect_top
+                            state.rect_bottom = o.rect_bottom
+                            state.registered_at = cur_t
+                            state.last_prev_t = prev_t
+                            # Re-seed tick price at the new edges so the
+                            # moved rectangle doesn't immediately register
+                            # a false "crossing" relative to its old edges.
+                            if tick:
+                                state._prev_tick_price = (
+                                    tick.bid + tick.ask) / 2
+                            self._missing_counts.pop(n, None)
+
+                # ── Touch detection (tick-based, timeframe-immune) ─
+                # Uses live bid/ask via SourceState.check_touch() instead
+                # of EA candle boundaries (CANDLE_T/PREV_T). This makes
+                # touch detection completely unaffected by the trader
+                # switching the MT5 chart's displayed timeframe, which
+                # previously caused duplicate order placement because
+                # the EA's reported candle times would jump to a
+                # different bar structure mid-session.
+                if tick:
+                    for n, state in self._sources.items():
+                        if state.state == SourceState.IDLE:
+                            state.check_touch(tick.bid, tick.ask)
+
+                # ── Monitor active/pending states ─────────────────
+                for n, state in list(self._sources.items()):
+                    if state.state in (SourceState.PENDING, SourceState.ACTIVE):
+                        state.check(candle)
+                    if n.startswith("RESUMED_") and state.state == SourceState.EXHAUSTED:
+                        self.log(
+                            f"✅  [{n[:25]}] resumed sequence complete — removing", "INFO"
+                        )
+                        del self._sources[n]
+                        self._seen.discard(n)
+
+                # ── Emit state to GUI ─────────────────────────────
+                self.sig.emit_state(
+                    [s.summary for s in self._sources.values()])
+
+                idle = [n for n, s in self._sources.items() if s.state ==
+                        SourceState.IDLE]
+                if idle:
+                    self.sig.emit_status(
+                        f"🟢  Watching {len(idle)} rectangle(s) | bid={bid:.5f}")
+                elif self._sources:
+                    self.sig.emit_status(
+                        f"🟢  {len(self._sources)} sequence(s) active")
+                else:
+                    self.sig.emit_status(
+                        "🟢  Running — draw a rectangle to start")
+
+            except Exception as e:
+                import traceback as _tb
+                self.log(f"💥 Watcher error: {type(e).__name__}: {e}", "ERROR")
+                for line in _tb.format_exc().strip().splitlines():
+                    self.log(f"   {line}", "ERROR")
+
+            self._stop_event.wait(cfg.SCAN_INTERVAL_SEC)
+
+        # ── Clean shutdown ────────────────────────────────────────
+        # mt5.shutdown() is called here — after the loop exits — so all
+        # watchers have already been stopped by the GUI's _stop() handler
+        # before MT5 loses connection.
+        #
+        # Each Python process that calls mt5.initialize() gets its own
+        # connection handle to the shared terminal — shutdown() here
+        # only tears down THIS process's handle, not a sibling
+        # gui.py process's connection to the same terminal. Wrapped in
+        # try/except purely so that if the shared terminal IPC is
+        # under load from other instances at this exact moment, a
+        # slow/odd shutdown response can't turn a clean stop into an
+        # unhandled crash.
+        try:
+            mt5.shutdown()
+        except Exception as e:
+            self.log(
+                f"⚠️  mt5.shutdown() raised on exit: {e} (non-fatal)", "WARN")
+        self.sig.emit_status("⚫  Stopped")
+        self.log("Bot stopped.")
+
+    def _connect(self) -> bool:
+        """
+        Connect to the shared MT5 terminal, with retries.
+
+        Running several gui.py processes against ONE MT5 terminal is
+        supported (one account, multiple symbols) — but real users
+        have reported transient IPC contention when several Python
+        processes call mt5.initialize()/login() against the same
+        terminal at nearly the same moment (e.g. starting 2-3 bots
+        within a second of each other). A short retry-with-backoff
+        here absorbs that without the whole bot instance dying on a
+        one-off hiccup.
+        """
+        MAX_ATTEMPTS = 5
+        last_error = None
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                ok = mt5.initialize(login=cfg.MT5_LOGIN,
+                                    password=cfg.MT5_PASSWORD,
+                                    server=cfg.MT5_SERVER)
+            except Exception as e:
+                ok = False
+                last_error = e
+
+            if ok:
+                info = mt5.account_info()
+                if info:
+                    self.log(
+                        f"✅ Connected: {info.name} | "
+                        f"Balance: {info.balance:.2f} {info.currency}"
+                    )
+                    self.sig.emit_status(f"🟢  Connected — {info.name}")
+                    return True
+                # initialize() said True but account_info() came back
+                # empty — also a known symptom of contention with
+                # another process connecting at the same instant.
+                last_error = "account_info() returned None after initialize()"
+
+            last_error = last_error or mt5.last_error()
+            if attempt < MAX_ATTEMPTS:
+                wait_s = min(2 * attempt, 8)
+                self.log(
+                    f"⚠️  MT5 connect attempt {attempt}/{MAX_ATTEMPTS} failed "
+                    f"({last_error}) — retrying in {wait_s}s "
+                    f"(this can happen when multiple bot instances connect "
+                    f"to the same terminal at once)", "WARN"
+                )
+                self._stop_event.wait(wait_s)
+                if self._stop_event.is_set():
+                    return False
+
+        self.log(f"❌ MT5 connection failed after {MAX_ATTEMPTS} attempts: "
+                 f"{last_error}", "ERROR")
+        self.sig.emit_status("❌  MT5 connection failed")
+        return False
