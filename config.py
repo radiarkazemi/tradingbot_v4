@@ -6,12 +6,13 @@
 """
 
 # ── MT5 CREDENTIALS ──────────────────────────────────────────────
-MT5_LOGIN    = 52936622
+MT5_LOGIN = 91246510
 MT5_PASSWORD = "@Radiar9841@"
-MT5_SERVER   = "Alpari-MT5-Demo"
+MT5_SERVER = "LiteFinance-MT5-Demo"
+
 
 # ── SYMBOL TO WATCH ──────────────────────────────────────────────
-WATCH_SYMBOL = "EURUSD"
+WATCH_SYMBOL = "EURUSD_o"
 
 # ── SCAN SETTINGS ────────────────────────────────────────────────
 SCAN_INTERVAL_SEC = 2
@@ -22,7 +23,7 @@ SCAN_INTERVAL_SEC = 2
 # bottom edges (see core/position_monitor.py SourceState). The
 # rectangle height IS the distance — nothing to configure.
 
-LOT_SIZE     = 0.01      # base lot — used as table index 0 ("start")
+LOT_SIZE = 0.01      # base lot — used as table index 0 ("start")
 MAGIC_NUMBER = 998877
 
 # ── SOFT LOT TABLE (item 4) ───────────────────────────────────────
@@ -53,9 +54,9 @@ SOFT_LOT_TABLE_MODE2 = [0.01, 0.01, 0.02, 0.04, 0.06, 0.08,
 LOT_MODE_MARTINGALE = 3
 
 MAX_TOUCHES = 11    # touch_count > this -> kill switch. Modes 1/2 ONLY
-                     # (mode 3 has no touch cap, matching its original
-                     # behavior, and is bounded only by margin/confluence
-                     # gating + the account-level hard stop-loss below).
+# (mode 3 has no touch cap, matching its original
+# behavior, and is bounded only by margin/confluence
+# gating + the account-level hard stop-loss below).
 
 # ── R1 / R2 / R3 (item 8) ─────────────────────────────────────────
 # R1 = Loss-Free: once floating profit reaches LOSS_FREE_TRIGGER_R,
@@ -82,7 +83,7 @@ RISK_FREE_TRIGGER_R = 2.0
 # never derived from a previous round's live position volume. If
 # that ever changes, re-verify this isn't reintroduced.
 PARTIAL_EXIT_ENABLED = True
-PARTIAL_EXIT_RATIO   = 0.70   # close this fraction of volume at R2
+PARTIAL_EXIT_RATIO = 0.70   # close this fraction of volume at R2
 
 # Balance-target TP (R3) - bot closes everything & stops once account
 # balance reaches start_balance * BALANCE_TP_RATIO.
