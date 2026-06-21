@@ -3,9 +3,6 @@ watcher.py — TraderBot v2
 Reads trader_objects_SYMBOL.txt (written by ObjectExporter EA).
 Detects candle touches on trader-drawn lines, delegates to SourceState.
 """
-from core.position_monitor import SourceState
-from core.order_manager import get_pip_size
-import config as cfg
 import MetaTrader5 as mt5
 import threading
 import time as _time
@@ -16,9 +13,11 @@ from dataclasses import dataclass
 from typing import Optional
 from datetime import datetime
 
-sys.path.insert(0, _os.path.dirname(
-    _os.path.dirname(_os.path.abspath(__file__))))
+sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
+import config as cfg
+from core.order_manager import get_pip_size
+from core.position_monitor import SourceState
 
 log = logging.getLogger("watcher_v2")
 
@@ -31,15 +30,13 @@ REMOVAL_GRACE = 3
 # ── File-bridge helpers ───────────────────────────────────────────
 
 def _get_file_paths(symbol=None):
-    appdata = _os.environ.get("APPDATA", "")
-    paths = []
+    appdata   = _os.environ.get("APPDATA", "")
+    paths     = []
     fname_sym = f"trader_objects_{symbol}.txt" if symbol else None
     fname_gen = "trader_objects.txt"
 
-    common = _os.path.join(appdata, "MetaQuotes",
-                           "Terminal", "Common", "Files")
-    if fname_sym:
-        paths.append(_os.path.join(common, fname_sym))
+    common = _os.path.join(appdata, "MetaQuotes", "Terminal", "Common", "Files")
+    if fname_sym: paths.append(_os.path.join(common, fname_sym))
     paths.append(_os.path.join(common, fname_gen))
 
     terminal_root = _os.path.join(appdata, "MetaQuotes", "Terminal")
@@ -48,8 +45,7 @@ def _get_file_paths(symbol=None):
             for tid in _os.listdir(terminal_root):
                 t_path = _os.path.join(terminal_root, tid, "MQL5", "Files")
                 if _os.path.isdir(t_path):
-                    if fname_sym:
-                        paths.append(_os.path.join(t_path, fname_sym))
+                    if fname_sym: paths.append(_os.path.join(t_path, fname_sym))
                     paths.append(_os.path.join(t_path, fname_gen))
     except Exception:
         pass
@@ -61,8 +57,7 @@ def _get_file_paths(symbol=None):
             for tid in _os.listdir(roaming):
                 t_path = _os.path.join(roaming, tid, "MQL5", "Files")
                 if _os.path.isdir(t_path):
-                    if fname_sym:
-                        paths.append(_os.path.join(t_path, fname_sym))
+                    if fname_sym: paths.append(_os.path.join(t_path, fname_sym))
                     paths.append(_os.path.join(t_path, fname_gen))
     except Exception:
         pass
@@ -82,7 +77,7 @@ def _find_objects_file(symbol=None):
                 try:
                     age = _time.time() - _os.path.getmtime(p)
                     if age < best_age:
-                        best_age = age
+                        best_age  = age
                         best_path = p
                 except Exception:
                     if best_path is None:
@@ -145,7 +140,7 @@ def _parse_file(path: str):
                 pass
         elif line.startswith("OBJ"):
             parts = line.split("|")
-            data = {}
+            data  = {}
             for p in parts[1:]:
                 if ":" in p:
                     k, v = p.split(":", 1)
@@ -155,11 +150,11 @@ def _parse_file(path: str):
                 if any(name.startswith(pfx) for pfx in cfg.AUTO_OBJECT_PREFIXES):
                     continue
                 objects.append(ChartObject(
-                    name=name,
-                    obj_type=data.get("TYPE", "OTHER"),
-                    type_id=int(data.get("TYPEID", 0)),
-                    price1=float(data.get("PRICE1", 0)),
-                    price2=float(data.get("PRICE2", 0)),
+                    name     = name,
+                    obj_type = data.get("TYPE", "OTHER"),
+                    type_id  = int(data.get("TYPEID", 0)),
+                    price1   = float(data.get("PRICE1", 0)),
+                    price2   = float(data.get("PRICE2", 0)),
                 ))
             except Exception:
                 pass
@@ -171,11 +166,11 @@ def _parse_file(path: str):
 
 class WatcherSignals:
     def __init__(self):
-        self._log_cbs = []
+        self._log_cbs    = []
         self._status_cbs = []
-        self._state_cbs = []
+        self._state_cbs  = []
         self._candle_cbs = []
-        self._stop_cbs = []   # called when balance TP fires
+        self._stop_cbs   = []   # called when balance TP fires
 
     def on_log(self, fn):    self._log_cbs.append(fn)
     def on_status(self, fn): self._status_cbs.append(fn)
@@ -184,24 +179,19 @@ class WatcherSignals:
     def on_stop(self, fn):   self._stop_cbs.append(fn)   # GUI registers here
 
     def emit_log(self, msg, level="INFO"):
-        for fn in self._log_cbs:
-            fn(msg, level)
+        for fn in self._log_cbs: fn(msg, level)
 
     def emit_status(self, msg):
-        for fn in self._status_cbs:
-            fn(msg)
+        for fn in self._status_cbs: fn(msg)
 
     def emit_state(self, states):
-        for fn in self._state_cbs:
-            fn(states)
+        for fn in self._state_cbs: fn(states)
 
     def emit_candle(self, candle):
-        for fn in self._candle_cbs:
-            fn(candle)
+        for fn in self._candle_cbs: fn(candle)
 
     def emit_stop(self):
-        for fn in self._stop_cbs:
-            fn()
+        for fn in self._stop_cbs: fn()
 
 
 # ── Watcher Thread ────────────────────────────────────────────────
@@ -213,15 +203,15 @@ class WatcherThread(threading.Thread):
                  risk_free_enabled: bool = False, loss_free_enabled: bool = False,
                  soft_lot_mode: int = 1):
         super().__init__(daemon=True)
-        self.symbol = symbol
-        self.lot_size = lot_size
-        self.follow_enabled = follow_enabled
-        self._resume_enabled = resume_enabled
+        self.symbol             = symbol
+        self.lot_size           = lot_size
+        self.follow_enabled     = follow_enabled
+        self._resume_enabled    = resume_enabled
         self._risk_free_enabled = risk_free_enabled
         self._loss_free_enabled = loss_free_enabled
-        self._soft_lot_mode = soft_lot_mode if soft_lot_mode in (1, 2) else 1
-        self.sig = WatcherSignals()
-        self._stop_event = threading.Event()
+        self._soft_lot_mode     = soft_lot_mode if soft_lot_mode in (1, 2, 3) else 1
+        self.sig                = WatcherSignals()
+        self._stop_event        = threading.Event()
         self._sources: dict[str, SourceState] = {}
         self._seen:    set = set()
         self._skipped: set = set()
@@ -299,7 +289,7 @@ class WatcherThread(threading.Thread):
                  f"risk_free={self._risk_free_enabled}")
 
         # ── Start balance ─────────────────────────────────────────
-        acct = mt5.account_info()
+        acct            = mt5.account_info()
         current_balance = acct.balance if acct else 0.0
 
         import json as _json
@@ -344,22 +334,22 @@ class WatcherThread(threading.Thread):
         if self._resume_enabled:
             from core.resume import scan_and_resume
             recovered = scan_and_resume(
-                symbol=self.symbol,
-                pip_size=pip,
-                base_lot=self.lot_size,
-                start_balance=self._start_balance,
-                risk_free_enabled=self._risk_free_enabled,
-                loss_free_enabled=self._loss_free_enabled,
-                soft_lot_mode=self._soft_lot_mode,
-                log_fn=self.log,
-                stop_fn=self._on_balance_tp,
+                symbol            = self.symbol,
+                pip_size          = pip,
+                base_lot          = self.lot_size,
+                start_balance     = self._start_balance,
+                risk_free_enabled = self._risk_free_enabled,
+                loss_free_enabled = self._loss_free_enabled,
+                soft_lot_mode     = self._soft_lot_mode,
+                log_fn            = self.log,
+                stop_fn           = self._on_balance_tp,
             )
             for name, state in recovered:
                 self._sources[name] = state
                 self._seen.add(name)
 
         warned_missing = stale_warned = False
-        last_ea_warn = None
+        last_ea_warn   = None
 
         while not self._stop_event.is_set():
             try:
@@ -385,8 +375,7 @@ class WatcherThread(threading.Thread):
 
                 if file_age > 15:
                     if not stale_warned:
-                        self.log(
-                            f"⚠️  EA file {file_age:.0f}s old — EA not running?", "WARN")
+                        self.log(f"⚠️  EA file {file_age:.0f}s old — EA not running?", "WARN")
                         stale_warned = True
                     self.sig.emit_status(f"⚠️  EA stopped ({file_age:.0f}s)")
                     self._stop_event.wait(cfg.SCAN_INTERVAL_SEC)
@@ -416,19 +405,18 @@ class WatcherThread(threading.Thread):
                 last_ea_warn = None
                 self.sig.emit_candle(candle)
 
-                cur_t = candle.get("CANDLE_T", 0)
-                cur_h = candle.get("CANDLE_H", 0.0)
-                cur_l = candle.get("CANDLE_L", 0.0)
-                cur_c = candle.get("CANDLE_C", 0.0)
+                cur_t  = candle.get("CANDLE_T", 0)
+                cur_h  = candle.get("CANDLE_H", 0.0)
+                cur_l  = candle.get("CANDLE_L", 0.0)
+                cur_c  = candle.get("CANDLE_C", 0.0)
                 prev_h = candle.get("PREV_H", 0.0)
                 prev_l = candle.get("PREV_L", 0.0)
                 prev_c = candle.get("PREV_C", 0.0)
                 prev_t = candle.get("PREV_T", 0)
-                bid = candle.get("BID", 0.0)
+                bid    = candle.get("BID", 0.0)
 
-                tick = mt5.symbol_info_tick(self.symbol)
-                current_price = (tick.bid + tick.ask) / \
-                    2 if tick else bid or cur_c
+                tick          = mt5.symbol_info_tick(self.symbol)
+                current_price = (tick.bid + tick.ask) / 2 if tick else bid or cur_c
 
                 cur_names = {o.name for o in objects}
 
@@ -451,27 +439,27 @@ class WatcherThread(threading.Thread):
                         continue
 
                     state = SourceState(
-                        name=n,
-                        rect_top=o.rect_top,
-                        rect_bottom=o.rect_bottom,
-                        pip_size=pip,
-                        symbol=self.symbol,
-                        base_lot=self.lot_size,
-                        start_balance=self._start_balance,
-                        log_fn=self.log,
-                        stop_fn=self._on_balance_tp,
-                        risk_free_enabled=self._risk_free_enabled,
-                        loss_free_enabled=self._loss_free_enabled,
-                        soft_lot_mode=self._soft_lot_mode,
+                        name              = n,
+                        rect_top          = o.rect_top,
+                        rect_bottom       = o.rect_bottom,
+                        pip_size          = pip,
+                        symbol            = self.symbol,
+                        base_lot          = self.lot_size,
+                        start_balance     = self._start_balance,
+                        log_fn            = self.log,
+                        stop_fn           = self._on_balance_tp,
+                        risk_free_enabled = self._risk_free_enabled,
+                        loss_free_enabled = self._loss_free_enabled,
+                        soft_lot_mode     = self._soft_lot_mode,
                     )
                     state.registered_at = cur_t
-                    state.last_prev_t = prev_t
+                    state.last_prev_t   = prev_t
                     # Seed tick price immediately so the first real
                     # tick after registration can't be misread as a
                     # "crossing" from an unset baseline.
                     if tick:
                         state._prev_tick_price = (tick.bid + tick.ask) / 2
-                    self._sources[n] = state
+                    self._sources[n]    = state
                     self._seen.add(n)
                     self.log(
                         f"🆕  [{n[:25]}] rect=[{o.rect_bottom:.5f}-{o.rect_top:.5f}] "
@@ -486,11 +474,9 @@ class WatcherThread(threading.Thread):
                     if n not in cur_names:
                         if n.startswith("RESUMED_") or n.startswith("AUTO_"):
                             continue
-                        self._missing_counts[n] = self._missing_counts.get(
-                            n, 0) + 1
+                        self._missing_counts[n] = self._missing_counts.get(n, 0) + 1
                         if self._missing_counts[n] >= REMOVAL_GRACE:
-                            self.log(
-                                f"🗑️  [{n[:25]}] removed — cancelling orders")
+                            self.log(f"🗑️  [{n[:25]}] removed — cancelling orders")
                             self._sources[n].reset()
                             del self._sources[n]
                             self._seen.discard(n)
@@ -526,16 +512,15 @@ class WatcherThread(threading.Thread):
                                 f"[{o.rect_bottom:.5f}-{o.rect_top:.5f}] — resetting"
                             )
                             state.reset()
-                            state.rect_top = o.rect_top
-                            state.rect_bottom = o.rect_bottom
+                            state.rect_top      = o.rect_top
+                            state.rect_bottom   = o.rect_bottom
                             state.registered_at = cur_t
-                            state.last_prev_t = prev_t
+                            state.last_prev_t   = prev_t
                             # Re-seed tick price at the new edges so the
                             # moved rectangle doesn't immediately register
                             # a false "crossing" relative to its old edges.
                             if tick:
-                                state._prev_tick_price = (
-                                    tick.bid + tick.ask) / 2
+                                state._prev_tick_price = (tick.bid + tick.ask) / 2
                             self._missing_counts.pop(n, None)
 
                 # ── Touch detection (tick-based, timeframe-immune) ─
@@ -563,20 +548,15 @@ class WatcherThread(threading.Thread):
                         self._seen.discard(n)
 
                 # ── Emit state to GUI ─────────────────────────────
-                self.sig.emit_state(
-                    [s.summary for s in self._sources.values()])
+                self.sig.emit_state([s.summary for s in self._sources.values()])
 
-                idle = [n for n, s in self._sources.items() if s.state ==
-                        SourceState.IDLE]
+                idle = [n for n, s in self._sources.items() if s.state == SourceState.IDLE]
                 if idle:
-                    self.sig.emit_status(
-                        f"🟢  Watching {len(idle)} rectangle(s) | bid={bid:.5f}")
+                    self.sig.emit_status(f"🟢  Watching {len(idle)} rectangle(s) | bid={bid:.5f}")
                 elif self._sources:
-                    self.sig.emit_status(
-                        f"🟢  {len(self._sources)} sequence(s) active")
+                    self.sig.emit_status(f"🟢  {len(self._sources)} sequence(s) active")
                 else:
-                    self.sig.emit_status(
-                        "🟢  Running — draw a rectangle to start")
+                    self.sig.emit_status("🟢  Running — draw a rectangle to start")
 
             except Exception as e:
                 import traceback as _tb
@@ -602,8 +582,7 @@ class WatcherThread(threading.Thread):
         try:
             mt5.shutdown()
         except Exception as e:
-            self.log(
-                f"⚠️  mt5.shutdown() raised on exit: {e} (non-fatal)", "WARN")
+            self.log(f"⚠️  mt5.shutdown() raised on exit: {e} (non-fatal)", "WARN")
         self.sig.emit_status("⚫  Stopped")
         self.log("Bot stopped.")
 
@@ -621,7 +600,7 @@ class WatcherThread(threading.Thread):
         one-off hiccup.
         """
         MAX_ATTEMPTS = 5
-        last_error = None
+        last_error   = None
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:

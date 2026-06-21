@@ -32,7 +32,7 @@ MAGIC_NUMBER = 998877
 # recovery stop is placed) — see SourceState._next_table_lot().
 # Reaching past index 11 (a 12th touch would be required) trips the
 # kill switch instead of placing another order — see MAX_TOUCHES.
-SOFT_LOT_MODE = 1   # 1 or 2 — selectable in the GUI
+SOFT_LOT_MODE = 1   # 1, 2, or 3 — selectable in the GUI
 
 SOFT_LOT_TABLE_MODE1 = [0.01, 0.01, 0.02, 0.03, 0.04, 0.05,
                         0.06, 0.07, 0.08, 0.09, 0.10, 0.11]
@@ -40,7 +40,22 @@ SOFT_LOT_TABLE_MODE1 = [0.01, 0.01, 0.02, 0.03, 0.04, 0.05,
 SOFT_LOT_TABLE_MODE2 = [0.01, 0.01, 0.02, 0.04, 0.06, 0.08,
                         0.10, 0.12, 0.14, 0.16, 0.18, 0.20]
 
-MAX_TOUCHES = 11    # touch_count > this -> kill switch (account-level)
+# Mode 3 = Classic Martingale — the original doubling formula this
+# project ran before the soft-lot tables existed. NOT table-driven:
+# every touch doubles whatever lot it's based on (round(x*2, 2),
+# floor 0.01), with NO MAX_TOUCHES kill switch — exactly like before,
+# this mode runs until balance TP (R3), the deep-round OB+FVG
+# bounce-confluence gate (kicks in once lot >= 0.64) declines to
+# continue, or margin protection can't even afford the minimum lot.
+# Kept available because the soft-lot tables intentionally trade away
+# some of this mode's recovery power for a much lower risk ceiling —
+# you may want the old behavior back for comparison/backtesting.
+LOT_MODE_MARTINGALE = 3
+
+MAX_TOUCHES = 11    # touch_count > this -> kill switch. Modes 1/2 ONLY
+                     # (mode 3 has no touch cap, matching its original
+                     # behavior, and is bounded only by margin/confluence
+                     # gating + the account-level hard stop-loss below).
 
 # ── R1 / R2 / R3 (item 8) ─────────────────────────────────────────
 # R1 = Loss-Free: once floating profit reaches LOSS_FREE_TRIGGER_R,
@@ -52,6 +67,22 @@ MAX_TOUCHES = 11    # touch_count > this -> kill switch (account-level)
 # R3 = Take-Profit: the existing balance-target TP (unchanged math).
 LOSS_FREE_TRIGGER_R = 1.0
 RISK_FREE_TRIGGER_R = 2.0
+
+# ── Partial Exit (scale-out at R2) ────────────────────────────────
+# When R2 (risk-free) triggers, close PARTIAL_EXIT_RATIO of the
+# position's volume immediately (banking real profit) and apply the
+# usual risk-free SL lock to the remaining volume, which keeps
+# running toward R3 (TP).
+#
+# NOTE on a real bug from an earlier prototype of this feature: the
+# shrunk volume after a partial close must NEVER be used as the basis
+# for sizing the NEXT round's lot. In v4 this can't happen by
+# construction — next-round lot always comes from the fixed soft-lot
+# table indexed by touch_count (see SourceState._next_table_lot),
+# never derived from a previous round's live position volume. If
+# that ever changes, re-verify this isn't reintroduced.
+PARTIAL_EXIT_ENABLED = True
+PARTIAL_EXIT_RATIO   = 0.70   # close this fraction of volume at R2
 
 # Balance-target TP (R3) - bot closes everything & stops once account
 # balance reaches start_balance * BALANCE_TP_RATIO.

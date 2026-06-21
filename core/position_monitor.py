@@ -48,61 +48,60 @@ def _save(state):
     except Exception:
         pass
 
-
 log = logging.getLogger("monitor_v2")
 
 ACTIVATION_GRACE_SEC = 5
 
 
 class SourceState:
-    IDLE = "idle"
-    PENDING = "pending"
-    ACTIVE = "active"
+    IDLE      = "idle"
+    PENDING   = "pending"
+    ACTIVE    = "active"
     EXHAUSTED = "exhausted"
 
     def __init__(self, name, rect_top, rect_bottom, pip_size, symbol, base_lot,
                  start_balance=0.0, log_fn=None, stop_fn=None, kill_fn=None,
                  risk_free_enabled=False, loss_free_enabled=False,
                  soft_lot_mode=1):
-        self.name = name
+        self.name          = name
         # Fixed rectangle edges — NEVER move after registration. This
         # is the "distance" now: rect_top - rect_bottom. (item 5/11)
-        self.rect_top = max(rect_top, rect_bottom)
-        self.rect_bottom = min(rect_top, rect_bottom)
-        self.pip_size = pip_size
-        self.symbol = symbol
-        self.base_lot = base_lot
+        self.rect_top      = max(rect_top, rect_bottom)
+        self.rect_bottom   = min(rect_top, rect_bottom)
+        self.pip_size      = pip_size
+        self.symbol        = symbol
+        self.base_lot      = base_lot
         self.start_balance = start_balance
-        self._log = log_fn or (lambda msg, level="INFO": log.info(msg))
-        self._stop_fn = stop_fn
-        self._kill_fn = kill_fn or stop_fn
+        self._log          = log_fn or (lambda msg, level="INFO": log.info(msg))
+        self._stop_fn      = stop_fn
+        self._kill_fn      = kill_fn or stop_fn
         self._risk_free_enabled = risk_free_enabled
         self._loss_free_enabled = loss_free_enabled
-        self.soft_lot_mode = soft_lot_mode if soft_lot_mode in (1, 2) else 1
+        self.soft_lot_mode      = soft_lot_mode if soft_lot_mode in (1, 2, 3) else 1
 
-        self.state = self.IDLE
-        self.round = 0
+        self.state           = self.IDLE
+        self.round           = 0
 
-        self.buy_ticket = None
-        self.sell_ticket = None
-        self.buy_pos_ticket = None
+        self.buy_ticket      = None
+        self.sell_ticket     = None
+        self.buy_pos_ticket  = None
         self.sell_pos_ticket = None
 
-        self.buy_lot = base_lot
-        self.sell_lot = base_lot
-        self.buy_sl = None
-        self.sell_sl = None
-        self.buy_r_frozen = 0.0
-        self.sell_r_frozen = 0.0
+        self.buy_lot         = base_lot
+        self.sell_lot        = base_lot
+        self.buy_sl          = None
+        self.sell_sl         = None
+        self.buy_r_frozen    = 0.0
+        self.sell_r_frozen   = 0.0
 
-        self._buy_confirmed = False
+        self._buy_confirmed  = False
         self._sell_confirmed = False
-        self._activated_at = 0.0
-        self._last_bid = 0.0
-        self._last_ask = 0.0
+        self._activated_at   = 0.0
+        self._last_bid       = 0.0
+        self._last_ask       = 0.0
 
-        self.registered_at = 0
-        self.last_prev_t = 0
+        self.registered_at   = 0
+        self.last_prev_t     = 0
 
         # ── Soft lot table (item 4) ───────────────────────────────
         # touch_count starts at 0 ("start" lot, both legs). Every
@@ -121,7 +120,7 @@ class SourceState:
         # opposite pending stop is left untouched. (unchanged from v3)
         self.loss_free_applied = {"buy": False, "sell": False}
         self.risk_free_applied = {"buy": False, "sell": False}
-        self.needs_full_reset = False   # watcher checks/clears this
+        self.needs_full_reset  = False   # watcher checks/clears this
 
         # Trader-adjustable override for the R1/R2 chart lines (item 9).
         # None = use the calculated price. If the trader drags the
@@ -159,14 +158,32 @@ class SourceState:
         configured pip value."""
         return (self.rect_top - self.rect_bottom) / 2.0
 
-    def _next_table_lot(self) -> float:
+    def _next_table_lot(self, base_lot: float = None) -> float:
         """
-        Advance touch_count by 1 and return the lot for that touch
-        from the configured soft-lot table. If this would exceed
-        config.MAX_TOUCHES, trips the kill switch instead and
-        returns None — every call site MUST check for None and bail
-        out (no order placement) when it gets None back.
+        Advance touch_count by 1 and return the lot for that touch.
+
+        Modes 1/2: looks up the next value from the configured
+        soft-lot table. If this would exceed config.MAX_TOUCHES,
+        trips the kill switch instead and returns None — every call
+        site MUST check for None and bail out (no order placement)
+        when it gets None back.
+
+        Mode 3 (classic martingale): NOT table-driven. Returns
+        round(base_lot * 2, 2), floored at 0.01 — the exact original
+        doubling formula, applied to whatever lot the caller passes
+        as `base_lot` (the leg this new lot is doubling off of — see
+        each call site for which lot that is, matching the original
+        code exactly). No MAX_TOUCHES cap in this mode: touch_count
+        still increments (for logging/GUI), but growth is bounded
+        only by the deep-round OB+FVG bounce-confluence gate (lot
+        >= 0.64) and margin protection, exactly like the original
+        behavior this mode restores.
         """
+        if self.soft_lot_mode == 3:
+            self.touch_count += 1
+            src = base_lot if base_lot is not None else self.base_lot
+            return max(round(src * 2, 2), 0.01)
+
         table = (cfg.SOFT_LOT_TABLE_MODE1 if self.soft_lot_mode == 1
                  else cfg.SOFT_LOT_TABLE_MODE2)
         next_touch = self.touch_count + 1
@@ -212,7 +229,7 @@ class SourceState:
         """BUY_STOP entry price = the rectangle's TOP edge,
         spread-compensated so the effective MT5 fill lands exactly
         at rect_top regardless of spread."""
-        raw = _round_price(self.rect_top, self.symbol)
+        raw    = _round_price(self.rect_top, self.symbol)
         spread = self._current_spread()
         return _round_price(raw - spread, self.symbol)
 
@@ -221,7 +238,7 @@ class SourceState:
         """SELL_STOP entry price = the rectangle's BOTTOM edge,
         spread-compensated so the effective MT5 fill lands exactly
         at rect_bottom regardless of spread."""
-        raw = _round_price(self.rect_bottom, self.symbol)
+        raw    = _round_price(self.rect_bottom, self.symbol)
         spread = self._current_spread()
         return _round_price(raw + spread, self.symbol)
 
@@ -273,8 +290,7 @@ class SourceState:
         """
         try:
             tick = mt5.symbol_info_tick(self.symbol)
-            price = (tick.bid + tick.ask) / \
-                2.0 if tick else (self.rect_top + self.rect_bottom) / 2.0
+            price = (tick.bid + tick.ask) / 2.0 if tick else (self.rect_top + self.rect_bottom) / 2.0
             profit = mt5.order_calc_profit(
                 mt5.ORDER_TYPE_BUY, self.symbol, lot, price, price + self.pip_size
             )
@@ -336,7 +352,7 @@ class SourceState:
         current_lot = max(self.buy_lot, self.sell_lot, self.base_lot)
         dpp = self._dollar_per_pip(current_lot)
 
-        rect_pips = (self.rect_top - self.rect_bottom) / self.pip_size
+        rect_pips  = (self.rect_top - self.rect_bottom) / self.pip_size
         floor_pips = rect_pips * 3
 
         if dpp <= 0:
@@ -430,18 +446,18 @@ class SourceState:
         mid = (bid + ask) / 2
 
         touched = False
-        desc = ""
+        desc    = ""
 
         for edge_name, edge in (("top", self.rect_top), ("bottom", self.rect_bottom)):
             if bid <= edge <= ask:
                 touched = True
-                desc = f"{edge_name} bid/ask straddle bid={bid:.5f} ask={ask:.5f}"
+                desc    = f"{edge_name} bid/ask straddle bid={bid:.5f} ask={ask:.5f}"
                 break
             if self._prev_tick_price is not None:
                 prev = self._prev_tick_price
                 if (prev < edge <= mid) or (mid <= edge < prev):
                     touched = True
-                    desc = f"{edge_name} crossed {prev:.5f}→{mid:.5f}"
+                    desc    = f"{edge_name} crossed {prev:.5f}→{mid:.5f}"
                     break
 
         self._prev_tick_price = mid
@@ -457,9 +473,9 @@ class SourceState:
         return False
 
     def place_initial_pair(self):
-        self.round = 1
+        self.round       = 1
         self.touch_count = 0
-        self.buy_lot = self.base_lot
+        self.buy_lot  = self.base_lot
         self.sell_lot = self.base_lot
 
         orders = [
@@ -470,16 +486,16 @@ class SourceState:
         ]
         results = send_pair(orders, self.symbol)
 
-        self.buy_ticket = None
+        self.buy_ticket  = None
         self.sell_ticket = None
         for r in results:
             if r["ok"]:
                 if r["order"]["type"] == "BUY_STOP":
                     self.buy_ticket = r["ticket"]
-                    self.buy_sl = self._buy_sl_price
+                    self.buy_sl     = self._buy_sl_price
                 else:
                     self.sell_ticket = r["ticket"]
-                    self.sell_sl = self._sell_sl_price
+                    self.sell_sl     = self._sell_sl_price
 
         # ── Both legs placed: normal success path ──────────────────
         if self.buy_ticket and self.sell_ticket:
@@ -528,10 +544,10 @@ class SourceState:
             if ok:
                 if missing_side == "SELL_STOP":
                     self.sell_ticket = ok[0]["ticket"]
-                    self.sell_sl = self._sell_sl_price
+                    self.sell_sl     = self._sell_sl_price
                 else:
                     self.buy_ticket = ok[0]["ticket"]
-                    self.buy_sl = self._buy_sl_price
+                    self.buy_sl     = self._buy_sl_price
                 got_missing_leg = True
                 self._log(
                     f"✅  [{self.name[:20]}] {missing_side} retry succeeded "
@@ -593,8 +609,8 @@ class SourceState:
         if self.start_balance <= 0:
             return
         try:
-            ratio = getattr(cfg, 'BALANCE_TP_RATIO', 1.10)
-            info = mt5.account_info()
+            ratio  = getattr(cfg, 'BALANCE_TP_RATIO', 1.10)
+            info   = mt5.account_info()
             if not info:
                 return
             target = self.start_balance * ratio
@@ -616,7 +632,7 @@ class SourceState:
             return
         try:
             ratio = getattr(cfg, 'HARD_STOP_LOSS_RATIO', 0.50)
-            info = mt5.account_info()
+            info  = mt5.account_info()
             if not info:
                 return
             floor = self.start_balance * (1.0 - ratio)
@@ -633,7 +649,7 @@ class SourceState:
 
     def _close_all_and_stop(self):
         filling = _filling_mode(self.symbol)
-        tick = mt5.symbol_info_tick(self.symbol)
+        tick    = mt5.symbol_info_tick(self.symbol)
 
         # Close all open positions
         for p in (mt5.positions_get(symbol=self.symbol) or []):
@@ -668,8 +684,7 @@ class SourceState:
         try:
             if _os.path.exists(_bal_file):
                 _os.remove(_bal_file)
-                self._log(
-                    f"🗑️  Cleared saved start balance (session complete)", "INFO")
+                self._log(f"🗑️  Cleared saved start balance (session complete)", "INFO")
         except Exception:
             pass
 
@@ -687,32 +702,32 @@ class SourceState:
     # ── Activation ────────────────────────────────────────────────
 
     def _check_activation(self):
-        pending = {o.ticket for o in (mt5.orders_get(symbol=self.symbol) or [])
-                   if o.magic == MAGIC_NUMBER}
+        pending   = {o.ticket for o in (mt5.orders_get(symbol=self.symbol) or [])
+                     if o.magic == MAGIC_NUMBER}
         positions = mt5.positions_get(symbol=self.symbol) or []
-        bot_pos = [p for p in positions if p.magic == MAGIC_NUMBER]
-        buy_pos = [p for p in bot_pos if p.type == 0]
-        sell_pos = [p for p in bot_pos if p.type == 1]
+        bot_pos   = [p for p in positions if p.magic == MAGIC_NUMBER]
+        buy_pos   = [p for p in bot_pos if p.type == 0]
+        sell_pos  = [p for p in bot_pos if p.type == 1]
 
-        buy_still = self.buy_ticket in pending if self.buy_ticket else False
+        buy_still  = self.buy_ticket  in pending if self.buy_ticket  else False
         sell_still = self.sell_ticket in pending if self.sell_ticket else False
-        buy_filled = self.buy_ticket is not None and not buy_still
+        buy_filled  = self.buy_ticket  is not None and not buy_still
         sell_filled = self.sell_ticket is not None and not sell_still
 
         if not buy_filled and not sell_filled:
             return
 
-        self._activated_at = _time.time()
-        self._buy_confirmed = False
+        self._activated_at   = _time.time()
+        self._buy_confirmed  = False
         self._sell_confirmed = False
 
         if buy_filled:
             if buy_pos:
                 pos = sorted(buy_pos, key=lambda p: p.time, reverse=True)[0]
                 self.buy_pos_ticket = pos.ticket
-                self.buy_sl = pos.sl
-                self.buy_r_frozen = abs(pos.price_open - pos.sl)
-                self.buy_lot = pos.volume
+                self.buy_sl         = pos.sl
+                self.buy_r_frozen   = abs(pos.price_open - pos.sl)
+                self.buy_lot        = pos.volume
                 self._buy_confirmed = True
             self.buy_ticket = None
 
@@ -720,14 +735,14 @@ class SourceState:
             if sell_pos:
                 pos = sorted(sell_pos, key=lambda p: p.time, reverse=True)[0]
                 self.sell_pos_ticket = pos.ticket
-                self.sell_sl = pos.sl
-                self.sell_r_frozen = abs(pos.price_open - pos.sl)
-                self.sell_lot = pos.volume
+                self.sell_sl         = pos.sl
+                self.sell_r_frozen   = abs(pos.price_open - pos.sl)
+                self.sell_lot        = pos.volume
                 self._sell_confirmed = True
             self.sell_ticket = None
 
         if buy_filled and not sell_filled:
-            next_lot = self._next_table_lot()
+            next_lot = self._next_table_lot(base_lot=self.buy_lot)
             if next_lot is None:
                 return  # kill switch tripped
             self.sell_lot = next_lot
@@ -740,7 +755,7 @@ class SourceState:
                 f"SELL#{self.sell_ticket} lot (touch {self.touch_count}) → {self.sell_lot:.2f}", "NEW"
             )
         elif sell_filled and not buy_filled:
-            next_lot = self._next_table_lot()
+            next_lot = self._next_table_lot(base_lot=self.sell_lot)
             if next_lot is None:
                 return  # kill switch tripped
             self.buy_lot = next_lot
@@ -767,14 +782,14 @@ class SourceState:
     # ── Active leg monitoring ─────────────────────────────────────
 
     def _check_legs(self):
-        now = _time.time()
+        now      = _time.time()
         in_grace = (now - self._activated_at) < ACTIVATION_GRACE_SEC
 
-        positions = mt5.positions_get(symbol=self.symbol) or []
-        bot_pos = [p for p in positions if p.magic == MAGIC_NUMBER]
+        positions    = mt5.positions_get(symbol=self.symbol) or []
+        bot_pos      = [p for p in positions if p.magic == MAGIC_NUMBER]
         open_tickets = {p.ticket for p in bot_pos}
-        buy_pos = [p for p in bot_pos if p.type == 0]
-        sell_pos = [p for p in bot_pos if p.type == 1]
+        buy_pos      = [p for p in bot_pos if p.type == 0]
+        sell_pos     = [p for p in bot_pos if p.type == 1]
 
         pending = {o.ticket for o in (mt5.orders_get(symbol=self.symbol) or [])
                    if o.magic == MAGIC_NUMBER}
@@ -784,9 +799,9 @@ class SourceState:
             if buy_pos:
                 pos = sorted(buy_pos, key=lambda p: p.time, reverse=True)[0]
                 self.buy_pos_ticket = pos.ticket
-                self.buy_sl = pos.sl
-                self.buy_r_frozen = abs(pos.price_open - pos.sl)
-                self.buy_lot = pos.volume
+                self.buy_sl         = pos.sl
+                self.buy_r_frozen   = abs(pos.price_open - pos.sl)
+                self.buy_lot        = pos.volume
                 self._buy_confirmed = True
                 self._log(
                     f"🔍  [{self.name[:20]}] BUY pos confirmed "
@@ -797,9 +812,9 @@ class SourceState:
             if sell_pos:
                 pos = sorted(sell_pos, key=lambda p: p.time, reverse=True)[0]
                 self.sell_pos_ticket = pos.ticket
-                self.sell_sl = pos.sl
-                self.sell_r_frozen = abs(pos.price_open - pos.sl)
-                self.sell_lot = pos.volume
+                self.sell_sl         = pos.sl
+                self.sell_r_frozen   = abs(pos.price_open - pos.sl)
+                self.sell_lot        = pos.volume
                 self._sell_confirmed = True
                 self._log(
                     f"🔍  [{self.name[:20]}] SELL pos confirmed "
@@ -812,12 +827,12 @@ class SourceState:
             if buy_pos:
                 pos = sorted(buy_pos, key=lambda p: p.time, reverse=True)[0]
                 self.buy_pos_ticket = pos.ticket
-                self.buy_sl = pos.sl
-                self.buy_r_frozen = abs(pos.price_open - pos.sl)
-                self.buy_lot = pos.volume
+                self.buy_sl         = pos.sl
+                self.buy_r_frozen   = abs(pos.price_open - pos.sl)
+                self.buy_lot        = pos.volume
                 self._buy_confirmed = True
-                self.buy_ticket = None
-                next_lot = self._next_table_lot()
+                self.buy_ticket     = None
+                next_lot = self._next_table_lot(base_lot=self.buy_lot)
                 if next_lot is None:
                     return  # kill switch tripped
                 self.sell_lot = next_lot
@@ -837,12 +852,12 @@ class SourceState:
             if sell_pos:
                 pos = sorted(sell_pos, key=lambda p: p.time, reverse=True)[0]
                 self.sell_pos_ticket = pos.ticket
-                self.sell_sl = pos.sl
-                self.sell_r_frozen = abs(pos.price_open - pos.sl)
-                self.sell_lot = pos.volume
+                self.sell_sl         = pos.sl
+                self.sell_r_frozen   = abs(pos.price_open - pos.sl)
+                self.sell_lot        = pos.volume
                 self._sell_confirmed = True
-                self.sell_ticket = None
-                next_lot = self._next_table_lot()
+                self.sell_ticket     = None
+                next_lot = self._next_table_lot(base_lot=self.sell_lot)
                 if next_lot is None:
                     return  # kill switch tripped
                 self.buy_lot = next_lot
@@ -1096,8 +1111,7 @@ class SourceState:
             if r > 0:
                 profit_dist = pos.price_current - pos.price_open
                 if profit_dist >= trigger_r * r:
-                    new_sl = self.override_r1_price.get(
-                        "buy") or pos.price_open
+                    new_sl = self.override_r1_price.get("buy") or pos.price_open
                     new_sl = _round_price(new_sl, self.symbol)
                     if self._move_position_sl(pos.ticket, new_sl):
                         self.loss_free_applied["buy"] = True
@@ -1114,8 +1128,7 @@ class SourceState:
             if r > 0:
                 profit_dist = pos.price_open - pos.price_current
                 if profit_dist >= trigger_r * r:
-                    new_sl = self.override_r1_price.get(
-                        "sell") or pos.price_open
+                    new_sl = self.override_r1_price.get("sell") or pos.price_open
                     new_sl = _round_price(new_sl, self.symbol)
                     if self._move_position_sl(pos.ticket, new_sl):
                         self.loss_free_applied["sell"] = True
@@ -1132,27 +1145,35 @@ class SourceState:
             pos = sorted(buy_pos, key=lambda p: p.time, reverse=True)[0]
             ov = self.override_r1_price.get("buy")
             if ov is not None and abs(pos.sl - ov) > self.pip_size * 0.9:
-                self._move_position_sl(
-                    pos.ticket, _round_price(ov, self.symbol))
+                self._move_position_sl(pos.ticket, _round_price(ov, self.symbol))
 
         if self.loss_free_applied.get("sell", False) and sell_pos:
             pos = sorted(sell_pos, key=lambda p: p.time, reverse=True)[0]
             ov = self.override_r1_price.get("sell")
             if ov is not None and abs(pos.sl - ov) > self.pip_size * 0.9:
-                self._move_position_sl(
-                    pos.ticket, _round_price(ov, self.symbol))
+                self._move_position_sl(pos.ticket, _round_price(ov, self.symbol))
 
     def _check_risk_free(self, buy_pos: list, sell_pos: list):
         """
-        R2 — Risk-Free. Once an open position's floating profit
-        reaches RISK_FREE_TRIGGER_R (default 2R), move its SL to
-        lock in enough profit to cover ALL cumulative losses taken
-        so far this cycle PLUS the current position's own risk — not
-        just +1R of the current round alone. A flat +1R badly
-        under-covers deep runs: by the time lot has grown several
-        steps, cumulative_loss can be many multiples of any single
-        round's R, so locking only that round's R leaves the cycle's
-        real, larger loss uncovered.
+        R2 — Risk-Free + Partial Exit. Once an open position's
+        floating profit reaches RISK_FREE_TRIGGER_R (default 2R):
+
+          1. If PARTIAL_EXIT_ENABLED, immediately close
+             PARTIAL_EXIT_RATIO (default 70%) of the position's
+             volume as a real deal — banking that profit right now,
+             not just on paper.
+          2. Move the SL on whatever volume remains (the full
+             position if partial exit was skipped/unavailable at
+             this size) to lock in enough profit to cover ALL
+             cumulative losses taken so far this cycle PLUS this
+             round's own risk — not just a flat +1R. A flat +1R badly
+             under-covers deep runs: by the time lot has grown
+             several touches, cumulative_loss can be many multiples
+             of any single round's R.
+
+        The remaining volume keeps running toward R3 (TP) with its
+        SL already locked — a classic scale-out: bank most of the
+        winner now, let a smaller "runner" chase the bigger target.
 
         TRIGGER uses the position's own frozen R (self.buy_r_frozen/
         sell_r_frozen) — that's the right basis for "has this round
@@ -1162,9 +1183,17 @@ class SourceState:
             total_at_risk_dollars = cumulative_loss + (R in dollars
                                     at the position's own lot)
         converted to a price distance via the REAL dollar-per-pip at
-        the position's actual lot, so the dollar amount actually
-        locked in matches the real cumulative loss regardless of lot
-        size at this round.
+        the REMAINING lot (post-partial-close, if it happened), so
+        the dollar amount actually locked in still matches the real
+        cumulative loss regardless of how much volume is left.
+
+        IMPORTANT (lessons from an earlier, buggy prototype of partial
+        exit): the remaining/reduced volume after a partial close is
+        used ONLY for this lock-distance calculation. It must NEVER
+        be used to size the next round's order — that's controlled
+        exclusively by the soft-lot table indexed by touch_count
+        (see _next_table_lot), completely independent of any live
+        position's volume. Don't wire pos.volume into that path.
 
         Item 9: once applied, the trader can drag the bot-drawn
         TB4_R2_<name> chart rectangle; the watcher reads it back into
@@ -1186,14 +1215,17 @@ class SourceState:
             if r > 0:
                 profit_dist = pos.price_current - pos.price_open
                 if profit_dist >= trigger_r * r:
+                    lot_for_lock = pos.volume
+                    if getattr(cfg, "PARTIAL_EXIT_ENABLED", False):
+                        remain = self._partial_close_position(
+                            pos.ticket, getattr(cfg, "PARTIAL_EXIT_RATIO", 0.70))
+                        if remain is not None:
+                            lot_for_lock = remain
                     if self.override_r2_price.get("buy") is not None:
-                        new_sl = _round_price(
-                            self.override_r2_price["buy"], self.symbol)
+                        new_sl = _round_price(self.override_r2_price["buy"], self.symbol)
                     else:
-                        lock_dist = self._risk_free_lock_distance(
-                            r, pos.volume)
-                        new_sl = _round_price(
-                            pos.price_open + lock_dist, self.symbol)
+                        lock_dist = self._risk_free_lock_distance(r, lot_for_lock)
+                        new_sl = _round_price(pos.price_open + lock_dist, self.symbol)
                     if self._move_position_sl(pos.ticket, new_sl):
                         self.risk_free_applied["buy"] = True
                         self._log(
@@ -1210,14 +1242,17 @@ class SourceState:
             if r > 0:
                 profit_dist = pos.price_open - pos.price_current
                 if profit_dist >= trigger_r * r:
+                    lot_for_lock = pos.volume
+                    if getattr(cfg, "PARTIAL_EXIT_ENABLED", False):
+                        remain = self._partial_close_position(
+                            pos.ticket, getattr(cfg, "PARTIAL_EXIT_RATIO", 0.70))
+                        if remain is not None:
+                            lot_for_lock = remain
                     if self.override_r2_price.get("sell") is not None:
-                        new_sl = _round_price(
-                            self.override_r2_price["sell"], self.symbol)
+                        new_sl = _round_price(self.override_r2_price["sell"], self.symbol)
                     else:
-                        lock_dist = self._risk_free_lock_distance(
-                            r, pos.volume)
-                        new_sl = _round_price(
-                            pos.price_open - lock_dist, self.symbol)
+                        lock_dist = self._risk_free_lock_distance(r, lot_for_lock)
+                        new_sl = _round_price(pos.price_open - lock_dist, self.symbol)
                     if self._move_position_sl(pos.ticket, new_sl):
                         self.risk_free_applied["sell"] = True
                         self._log(
@@ -1233,15 +1268,13 @@ class SourceState:
             pos = sorted(buy_pos, key=lambda p: p.time, reverse=True)[0]
             ov = self.override_r2_price.get("buy")
             if ov is not None and abs(pos.sl - ov) > self.pip_size * 0.9:
-                self._move_position_sl(
-                    pos.ticket, _round_price(ov, self.symbol))
+                self._move_position_sl(pos.ticket, _round_price(ov, self.symbol))
 
         if self.risk_free_applied.get("sell", False) and sell_pos:
             pos = sorted(sell_pos, key=lambda p: p.time, reverse=True)[0]
             ov = self.override_r2_price.get("sell")
             if ov is not None and abs(pos.sl - ov) > self.pip_size * 0.9:
-                self._move_position_sl(
-                    pos.ticket, _round_price(ov, self.symbol))
+                self._move_position_sl(pos.ticket, _round_price(ov, self.symbol))
 
     def _risk_free_lock_distance(self, r_price: float, lot: float) -> float:
         """
@@ -1262,7 +1295,7 @@ class SourceState:
 
         r_pips = r_price / self.pip_size
         this_round_risk_dollars = r_pips * dpp
-        total_at_risk_dollars = self.cumulative_loss + this_round_risk_dollars
+        total_at_risk_dollars   = self.cumulative_loss + this_round_risk_dollars
 
         lock_pips = total_at_risk_dollars / dpp
         return lock_pips * self.pip_size
@@ -1292,6 +1325,77 @@ class SourceState:
         except Exception as e:
             log.warning("Risk-free SL move error: %s", e)
             return False
+
+    def _partial_close_position(self, ticket: int, close_fraction: float):
+        """
+        Close `close_fraction` of an open position's volume via a
+        real opposite-side deal against it (same mechanism MT5 uses
+        for any partial close — same ticket survives with reduced
+        volume). Returns the resulting remaining volume on success,
+        or None if skipped/failed.
+
+        Respects the symbol's volume_step/volume_min — if either the
+        slice to close or what would remain falls below volume_min
+        once rounded to volume_step, the partial close is skipped
+        entirely (not attempted at a wrong size) and the position is
+        left at full volume for the caller to handle normally.
+        """
+        try:
+            pos = next((p for p in (mt5.positions_get(symbol=self.symbol) or [])
+                       if p.ticket == ticket), None)
+            if not pos:
+                return None
+
+            info = mt5.symbol_info(self.symbol)
+            step = getattr(info, "volume_step", 0.01) or 0.01
+            vmin = getattr(info, "volume_min", 0.01) or 0.01
+
+            raw_close  = pos.volume * close_fraction
+            close_vol  = round(raw_close / step) * step
+            close_vol  = round(close_vol, 2)
+            remain_vol = round(pos.volume - close_vol, 2)
+
+            if close_vol < vmin or remain_vol < vmin:
+                self._log(
+                    f"ℹ️  [{self.name[:20]}] partial exit skipped for #{ticket} "
+                    f"(vol={pos.volume:.2f} too small to split at "
+                    f"{close_fraction*100:.0f}% / volume_min={vmin}) — "
+                    f"keeping full position, normal risk-free SL still applies",
+                    "INFO"
+                )
+                return None
+
+            is_buy  = pos.type == 0
+            tick    = mt5.symbol_info_tick(self.symbol)
+            filling = _filling_mode(self.symbol)
+            res = mt5.order_send({
+                "action":       mt5.TRADE_ACTION_DEAL,
+                "symbol":       self.symbol,
+                "volume":       close_vol,
+                "type":         mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+                "position":     ticket,
+                "price":        tick.bid if is_buy else tick.ask,
+                "deviation":    30,
+                "magic":        MAGIC_NUMBER,
+                "comment":      "TB4_PartialExit",
+                "type_filling": filling,
+            })
+            if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                self._log(
+                    f"💵  [{self.name[:20]}] partial exit #{ticket} | "
+                    f"closed {close_vol:.2f} lot ({close_fraction*100:.0f}%) | "
+                    f"{remain_vol:.2f} lot still running to TP", "NEW"
+                )
+                return remain_vol
+            self._log(
+                f"⚠️  [{self.name[:20]}] partial exit failed for #{ticket}: "
+                f"{getattr(res, 'comment', 'unknown error')} — "
+                f"keeping full position, normal risk-free SL still applies", "WARN"
+            )
+            return None
+        except Exception as e:
+            log.warning("Partial exit error: %s", e)
+            return None
 
     def _get_close_info(self, position_ticket: int):
         """
@@ -1332,7 +1436,7 @@ class SourceState:
             return price, reason
         except Exception as e:
             log.warning("Could not fetch close info for #%s: %s",
-                        position_ticket, e)
+                       position_ticket, e)
             return None, None
 
     def _get_close_price(self, position_ticket: int):
@@ -1380,8 +1484,8 @@ class SourceState:
             )
             if not probe_margin or probe_margin <= 0:
                 return 0.0
-            free_margin = acct.margin_free
-            equity = acct.equity
+            free_margin   = acct.margin_free
+            equity        = acct.equity
             safety_margin = equity * 0.05
             usable_margin = free_margin - safety_margin
             if usable_margin <= 0:
@@ -1462,14 +1566,14 @@ class SourceState:
     def _can_afford(self, lot: float, is_buy: bool) -> bool:
         try:
             action = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
-            tick = mt5.symbol_info_tick(self.symbol)
-            price = tick.ask if is_buy else tick.bid
+            tick   = mt5.symbol_info_tick(self.symbol)
+            price  = tick.ask if is_buy else tick.bid
             margin = mt5.order_calc_margin(action, self.symbol, lot, price)
-            acct = mt5.account_info()
+            acct   = mt5.account_info()
             if margin is None or acct is None:
                 return True
-            free_margin = acct.margin_free
-            equity = acct.equity
+            free_margin   = acct.margin_free
+            equity        = acct.equity
             # 5% cushion — enough to avoid landing right at a literal
             # margin call after this fill, without blocking trades the
             # account can genuinely afford. The previous 20% buffer
@@ -1492,8 +1596,8 @@ class SourceState:
             return True
 
     def _place_new_buy_stop(self, anchor_price: float = None):
-        self.round += 1
-        next_lot = self._next_table_lot()
+        self.round  += 1
+        next_lot = self._next_table_lot(base_lot=self.sell_lot)
         if next_lot is None:
             return  # kill switch tripped
         self.buy_lot = next_lot
@@ -1570,7 +1674,7 @@ class SourceState:
 
         if ok:
             self.buy_ticket = ok[0]["ticket"]
-            next_opp = self._next_table_lot()
+            next_opp = self._next_table_lot(base_lot=self.buy_lot)
             if next_opp is None:
                 return  # kill switch tripped (logs/closes handled inside)
             self.sell_lot = next_opp
@@ -1587,8 +1691,8 @@ class SourceState:
             _save(self)
 
     def _place_new_sell_stop(self, anchor_price: float = None):
-        self.round += 1
-        next_lot = self._next_table_lot()
+        self.round   += 1
+        next_lot = self._next_table_lot(base_lot=self.buy_lot)
         if next_lot is None:
             return  # kill switch tripped
         self.sell_lot = next_lot
@@ -1647,7 +1751,7 @@ class SourceState:
 
         if ok:
             self.sell_ticket = ok[0]["ticket"]
-            next_opp = self._next_table_lot()
+            next_opp = self._next_table_lot(base_lot=self.sell_lot)
             if next_opp is None:
                 return  # kill switch tripped (logs/closes handled inside)
             self.buy_lot = next_opp
@@ -1677,15 +1781,15 @@ class SourceState:
 
         cancel_order(ticket)
 
-        is_buy = target.type == mt5.ORDER_TYPE_BUY_STOP
+        is_buy     = target.type == mt5.ORDER_TYPE_BUY_STOP
         order_type = mt5.ORDER_TYPE_BUY_STOP if is_buy else mt5.ORDER_TYPE_SELL_STOP
-        filling = _filling_mode(self.symbol)
-        use_sl = exact_sl if exact_sl is not None else target.sl
-        entry = target.price_open
+        filling    = _filling_mode(self.symbol)
+        use_sl     = exact_sl if exact_sl is not None else target.sl
+        entry      = target.price_open
 
-        tick = mt5.symbol_info_tick(self.symbol)
-        bid = tick.bid if tick else 0.0
-        ask = tick.ask if tick else 0.0
+        tick         = mt5.symbol_info_tick(self.symbol)
+        bid          = tick.bid if tick else 0.0
+        ask          = tick.ask if tick else 0.0
         already_past = (is_buy and ask > 0 and entry <= ask) or \
                        (not is_buy and bid > 0 and entry >= bid)
 
@@ -1750,26 +1854,26 @@ class SourceState:
         for ticket in [self.buy_ticket, self.sell_ticket]:
             if ticket:
                 cancel_order(ticket)
-        self.buy_ticket = None
-        self.sell_ticket = None
-        self.buy_pos_ticket = None
+        self.buy_ticket      = None
+        self.sell_ticket     = None
+        self.buy_pos_ticket  = None
         self.sell_pos_ticket = None
-        self.buy_lot = self.base_lot
-        self.sell_lot = self.base_lot
-        self.buy_sl = None
-        self.sell_sl = None
-        self.buy_r_frozen = 0.0
-        self.sell_r_frozen = 0.0
-        self.round = 0
-        self.touch_count = 0
-        self.state = self.IDLE
-        self._buy_confirmed = False
+        self.buy_lot         = self.base_lot
+        self.sell_lot        = self.base_lot
+        self.buy_sl          = None
+        self.sell_sl         = None
+        self.buy_r_frozen    = 0.0
+        self.sell_r_frozen   = 0.0
+        self.round           = 0
+        self.touch_count     = 0
+        self.state           = self.IDLE
+        self._buy_confirmed  = False
         self._sell_confirmed = False
         self.risk_free_applied = {"buy": False, "sell": False}
         self.loss_free_applied = {"buy": False, "sell": False}
         self.override_r1_price = {"buy": None, "sell": None}
         self.override_r2_price = {"buy": None, "sell": None}
-        self.cumulative_loss = 0.0
+        self.cumulative_loss   = 0.0
         self._pip_value_per_base_lot = 0.0
         self._log(f"🔄  [{self.name[:20]}] state reset to IDLE")
         try:
