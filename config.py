@@ -6,13 +6,13 @@
 """
 
 # ── MT5 CREDENTIALS ──────────────────────────────────────────────
-# MT5_LOGIN = 91246510
-# MT5_PASSWORD = "@Radiar9841@"
-# MT5_SERVER = "LiteFinance-MT5-Demo"
-
-MT5_LOGIN = 52936622
+MT5_LOGIN = 91246510
 MT5_PASSWORD = "@Radiar9841@"
-MT5_SERVER = "Alpari-MT5-Demo"
+MT5_SERVER = "LiteFinance-MT5-Demo"
+
+# MT5_LOGIN = 52936622
+# MT5_PASSWORD = "@Radiar9841@"
+# MT5_SERVER = "Alpari-MT5-Demo"
 
 
 # ── SYMBOL TO WATCH ──────────────────────────────────────────────
