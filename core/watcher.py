@@ -66,9 +66,34 @@ def _get_file_paths(symbol=None):
 
 
 def _find_objects_file(symbol=None):
+    """
+    Different brokers append different suffixes to the "raw" symbol
+    name (e.g. Alpari uses "_i", LiteFinance uses "_o", others use
+    ".a"/".raw"/"m"/"#" etc.) — the EA writes its object/command files
+    using whatever name MT5 reports for the chart's symbol, which
+    includes that suffix. Rather than hardcode one broker's
+    convention (which silently breaks the moment you switch brokers —
+    exactly what happened moving from Alpari to LiteFinance), try the
+    bare symbol, common suffixes added, and common suffixes stripped,
+    and pick whichever matching file was modified most recently.
+    """
+    KNOWN_SUFFIXES = ("_i", "_o", "_m", ".a", ".raw", ".r", "#", "m")
+
     syms = [symbol]
     if symbol:
-        syms.append(symbol[:-2] if symbol.endswith("_i") else symbol + "_i")
+        stripped = symbol
+        for suf in KNOWN_SUFFIXES:
+            if symbol.endswith(suf):
+                stripped = symbol[:-len(suf)]
+                break
+        if stripped != symbol:
+            syms.append(stripped)
+        else:
+            syms.append(symbol)  # already bare; nothing to strip
+        for suf in KNOWN_SUFFIXES:
+            candidate = stripped + suf
+            if candidate not in syms:
+                syms.append(candidate)
         syms.append(None)
     best_path, best_age = None, float("inf")
     for sym in syms:
@@ -227,20 +252,41 @@ class WatcherThread(threading.Thread):
         (new sources created after this call already pick up the
         updated self._risk_free_enabled at construction time, see the
         SourceState(...) call further down in the scan loop).
+
+        Disabling while already locked in reverts the SL back to the
+        normal rectangle-pinned value (see SourceState.revert_risk_free) -
+        turning the feature off undoes the lock, it doesn't leave the
+        SL parked at the locked level forever.
         """
         self._risk_free_enabled = enabled
         for state in self._sources.values():
             state._risk_free_enabled = enabled
+            if not enabled:
+                try:
+                    state.revert_risk_free()
+                except Exception as e:
+                    # One source's revert must never block the others,
+                    # and must never disappear silently either.
+                    self.log(f"💥  [{state.name[:20]}] revert_risk_free crashed: "
+                            f"{type(e).__name__}: {e}", "ERROR")
         self.log(
             f"🛡️  Risk-Free (R2) {'ENABLED' if enabled else 'DISABLED'} "
             f"({len(self._sources)} active source(s) updated)"
         )
 
     def set_loss_free_enabled(self, enabled: bool):
-        """Update the R1 loss-free flag live — see set_risk_free_enabled."""
+        """Update the R1 loss-free flag live — see set_risk_free_enabled.
+        Disabling while already locked in reverts the SL (see
+        SourceState.revert_loss_free)."""
         self._loss_free_enabled = enabled
         for state in self._sources.values():
             state._loss_free_enabled = enabled
+            if not enabled:
+                try:
+                    state.revert_loss_free()
+                except Exception as e:
+                    self.log(f"💥  [{state.name[:20]}] revert_loss_free crashed: "
+                            f"{type(e).__name__}: {e}", "ERROR")
         self.log(
             f"🟩  Loss-Free (R1) {'ENABLED' if enabled else 'DISABLED'} "
             f"({len(self._sources)} active source(s) updated)"

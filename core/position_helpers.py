@@ -19,6 +19,49 @@ from core.position_monitor_base import log, ACTIVATION_GRACE_SEC, _save
 
 
 class _HelpersMixin:
+    def _close_position_by_ticket(self, ticket: int) -> bool:
+        """
+        Close ONE specific open position at current market price.
+        Unlike _close_all_and_stop (account-wide, used by kill
+        switches), this only touches the exact ticket given — used by
+        the entry-gap correction (see position_protection.py's
+        _check_entry_gap) to close just the one gap-filled leg (and
+        its paired sibling) without disturbing any other rectangle's
+        positions on the same symbol.
+        """
+        try:
+            pos = next((p for p in (mt5.positions_get(symbol=self.symbol) or [])
+                       if p.ticket == ticket), None)
+            if not pos:
+                return False
+            tick = mt5.symbol_info_tick(self.symbol)
+            if not tick:
+                return False
+            is_buy = pos.type == 0
+            res = mt5.order_send({
+                "action":       mt5.TRADE_ACTION_DEAL,
+                "symbol":       self.symbol,
+                "volume":       pos.volume,
+                "type":         mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+                "position":     ticket,
+                "price":        tick.bid if is_buy else tick.ask,
+                "deviation":    30,
+                "magic":        MAGIC_NUMBER,
+                "comment":      "TB4_GapFix",
+                "type_filling": _filling_mode(self.symbol),
+            })
+            if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                self._log(f"✅  [{self.name[:20]}] closed #{ticket} (gap correction)", "NEW")
+                return True
+            self._log(
+                f"⚠️  [{self.name[:20]}] failed to close #{ticket} for gap correction: "
+                f"{getattr(res, 'comment', 'unknown error')}", "WARN"
+            )
+            return False
+        except Exception as e:
+            log.warning("Gap-correction close error: %s", e)
+            return False
+
     def _move_position_sl(self, ticket: int, new_sl: float) -> bool:
         """Modify an open position's SL via TRADE_ACTION_SLTP."""
         try:
@@ -88,15 +131,15 @@ class _HelpersMixin:
 
         cancel_order(ticket)
 
-        is_buy = target.type == mt5.ORDER_TYPE_BUY_STOP
+        is_buy     = target.type == mt5.ORDER_TYPE_BUY_STOP
         order_type = mt5.ORDER_TYPE_BUY_STOP if is_buy else mt5.ORDER_TYPE_SELL_STOP
-        filling = _filling_mode(self.symbol)
-        use_sl = exact_sl if exact_sl is not None else target.sl
-        entry = target.price_open
+        filling    = _filling_mode(self.symbol)
+        use_sl     = exact_sl if exact_sl is not None else target.sl
+        entry      = target.price_open
 
-        tick = mt5.symbol_info_tick(self.symbol)
-        bid = tick.bid if tick else 0.0
-        ask = tick.ask if tick else 0.0
+        tick         = mt5.symbol_info_tick(self.symbol)
+        bid          = tick.bid if tick else 0.0
+        ask          = tick.ask if tick else 0.0
         already_past = (is_buy and ask > 0 and entry <= ask) or \
                        (not is_buy and bid > 0 and entry >= bid)
 
@@ -196,7 +239,7 @@ class _HelpersMixin:
             return price, reason
         except Exception as e:
             log.warning("Could not fetch close info for #%s: %s",
-                        position_ticket, e)
+                       position_ticket, e)
             return None, None
 
     def _get_close_price(self, position_ticket: int):
@@ -244,8 +287,8 @@ class _HelpersMixin:
             )
             if not probe_margin or probe_margin <= 0:
                 return 0.0
-            free_margin = acct.margin_free
-            equity = acct.equity
+            free_margin   = acct.margin_free
+            equity        = acct.equity
             safety_margin = equity * 0.05
             usable_margin = free_margin - safety_margin
             if usable_margin <= 0:
@@ -261,14 +304,14 @@ class _HelpersMixin:
     def _can_afford(self, lot: float, is_buy: bool) -> bool:
         try:
             action = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
-            tick = mt5.symbol_info_tick(self.symbol)
-            price = tick.ask if is_buy else tick.bid
+            tick   = mt5.symbol_info_tick(self.symbol)
+            price  = tick.ask if is_buy else tick.bid
             margin = mt5.order_calc_margin(action, self.symbol, lot, price)
-            acct = mt5.account_info()
+            acct   = mt5.account_info()
             if margin is None or acct is None:
                 return True
-            free_margin = acct.margin_free
-            equity = acct.equity
+            free_margin   = acct.margin_free
+            equity        = acct.equity
             # 5% cushion — enough to avoid landing right at a literal
             # margin call after this fill, without blocking trades the
             # account can genuinely afford. The previous 20% buffer
