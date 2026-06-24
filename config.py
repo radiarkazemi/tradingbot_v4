@@ -6,13 +6,14 @@
 """
 
 # ── MT5 CREDENTIALS ──────────────────────────────────────────────
-# MT5_LOGIN    = 52936622
+# MT5_LOGIN = 52936622
 # MT5_PASSWORD = "@Radiar9841@"
-# MT5_SERVER   = "Alpari-MT5-Demo"
+# MT5_SERVER = "Alpari-MT5-Demo"
 
-MT5_LOGIN    = 91246510
+
+MT5_LOGIN = 91246510
 MT5_PASSWORD = "@Radiar9841@"
-MT5_SERVER   = "LiteFinance-MT5-Demo"
+MT5_SERVER = "LiteFinance-MT5-Demo"
 
 # ── SYMBOL TO WATCH ──────────────────────────────────────────────
 WATCH_SYMBOL = "EURUSD"
@@ -26,7 +27,7 @@ SCAN_INTERVAL_SEC = 2
 # bottom edges (see core/position_monitor.py SourceState). The
 # rectangle height IS the distance — nothing to configure.
 
-LOT_SIZE     = 0.01      # base lot — used as table index 0 ("start")
+LOT_SIZE = 0.01      # base lot — used as table index 0 ("start")
 MAGIC_NUMBER = 998877
 
 # ── SOFT LOT TABLE (item 4) ───────────────────────────────────────
@@ -57,9 +58,9 @@ SOFT_LOT_TABLE_MODE2 = [0.01, 0.01, 0.02, 0.04, 0.06, 0.08,
 LOT_MODE_MARTINGALE = 3
 
 MAX_TOUCHES = 11    # touch_count > this -> kill switch. Modes 1/2 ONLY
-                     # (mode 3 has no touch cap, matching its original
-                     # behavior, and is bounded only by margin/confluence
-                     # gating + the account-level hard stop-loss below).
+# (mode 3 has no touch cap, matching its original
+# behavior, and is bounded only by margin/confluence
+# gating + the account-level hard stop-loss below).
 
 # ── Entry gap correction ──────────────────────────────────────────
 # A candle gap (price jumps between two ticks/bars, e.g. over a news
@@ -75,6 +76,30 @@ MAX_TOUCHES = 11    # touch_count > this -> kill switch. Modes 1/2 ONLY
 # value) so it scales correctly across symbols with very different
 # price scales (e.g. EURUSD vs XAUUSD) and rectangle sizes.
 ENTRY_GAP_TOLERANCE_FRACTION = 0.20
+
+# ── Duplicate/overlapping rectangle protection ────────────────────
+# Caught live: two real chart rectangles sitting 0.2-0.3 price units
+# apart (a leftover from earlier testing next to a newly-drawn one)
+# both registered as independent signals and both got traded -
+# doubling exposure on what was really the same zone, unintentionally.
+# Before registering any NEW rectangle, the watcher now checks it
+# against every currently-active (non-EXHAUSTED) rectangle's price
+# range; if the overlap exceeds this fraction of the SMALLER
+# rectangle's own height, registration is refused (not just warned)
+# and logged loudly with both rectangles' names/ranges so the trader
+# can decide which one to delete. Not a permanent block — re-checked
+# every scan, so it resolves itself the moment the conflicting
+# rectangle finishes (goes EXHAUSTED) or gets deleted.
+RECTANGLE_OVERLAP_WARN_FRACTION = 0.50
+# "skip" = refuse to register the new one until the conflict clears.
+# "warn" = register anyway, just log loudly - for anyone who actually
+# wants overlapping rectangles sometimes and only wants the heads-up.
+RECTANGLE_OVERLAP_ACTION = "skip"
+# The overlap check itself re-runs every scan (so it self-resolves the
+# instant the conflict clears), but logging it every ~2 seconds for as
+# long as both rectangles coexist is just noise - throttled to once
+# per this many seconds per conflicting pair instead.
+RECTANGLE_OVERLAP_LOG_REPEAT_SEC = 60.0
 
 # ── R1 / R2 / R3 (item 8) ─────────────────────────────────────────
 # R1 = Loss-Free: once floating profit reaches LOSS_FREE_TRIGGER_R,
@@ -101,7 +126,7 @@ RISK_FREE_TRIGGER_R = 2.0
 # never derived from a previous round's live position volume. If
 # that ever changes, re-verify this isn't reintroduced.
 PARTIAL_EXIT_ENABLED = True
-PARTIAL_EXIT_RATIO   = 0.70   # close this fraction of volume at R2
+PARTIAL_EXIT_RATIO = 0.70   # close this fraction of volume at R2
 
 # Balance-target TP (R3) - bot closes everything & stops once account
 # balance reaches start_balance * BALANCE_TP_RATIO.

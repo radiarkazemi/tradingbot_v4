@@ -87,10 +87,21 @@ class _EntryMixin:
         return False
 
     def place_initial_pair(self):
-        self.round = 1
-        self.touch_count = 0
-        self.buy_lot = self.base_lot
-        self.sell_lot = self.base_lot
+        if self.round == 0:
+            # Genuinely fresh start for this rectangle.
+            self.round = 1
+            self.touch_count = 0
+            self.buy_lot = self.base_lot
+            self.sell_lot = self.base_lot
+        # else: round > 0 means this is a RETRY after a gap-correction
+        # (_abort_gapped_round — see position_protection.py) mid-cycle,
+        # not a fresh start. Deliberately do NOT reset round/touch_count/
+        # buy_lot/sell_lot here — the whole point of that retry path is
+        # to resume exactly where the gap-corrected round left off
+        # (same lot, same round, same cumulative_loss), not restart the
+        # recovery cycle from scratch just because one fill needed
+        # correcting. The rectangle's edges never move either way, so
+        # _buy_entry/_sell_entry below are correct for both cases.
 
         orders = [
             {"type": "BUY_STOP",  "entry": self._buy_entry,  "sl": self._buy_sl_price,
@@ -115,7 +126,7 @@ class _EntryMixin:
         if self.buy_ticket and self.sell_ticket:
             self.state = self.PENDING
             self._log(
-                f"📌  [{self.name[:20]}] R1 pair placed | "
+                f"📌  [{self.name[:20]}] R{self.round} pair placed | "
                 f"BUY#{self.buy_ticket}@{self._buy_entry:.5f} "
                 f"sl={self._buy_sl_price:.5f} lot={self.buy_lot:.2f} | "
                 f"SELL#{self.sell_ticket}@{self._sell_entry:.5f} "

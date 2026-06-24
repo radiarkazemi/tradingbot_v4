@@ -27,9 +27,24 @@ class _ProtectionMixin:
         slippage that's normal and already handled by SL always
         pinning to the rectangle edge regardless of fill price). If
         detected: close this leg AND its sibling immediately, then
-        reset to retry on a future clean touch — by explicit request,
-        rather than running the whole recovery cycle on a
+        retry the SAME round on a future clean touch — by explicit
+        request, rather than running the whole recovery cycle on a
         structurally invalid entry.
+
+        IMPORTANT — does NOT call reset()/reset(final=False): that
+        method unconditionally zeroes cumulative_loss, round,
+        touch_count, and buy_lot/sell_lot back to base_lot. Calling it
+        here would silently erase the running tally of every real
+        loss taken so far this cycle — exactly the number the
+        eventual TP target is computed to cover — the instant a
+        single gap-filled entry happened to need correcting, even
+        deep into a recovery sequence. The trader would see the
+        rectangle 'win' later while the account is actually still net
+        down by everything that was wiped. Uses
+        _abort_gapped_round() instead, which clears only the per-
+        attempt order/position bookkeeping and explicitly preserves
+        cumulative_loss/round/touch_count/buy_lot/sell_lot so the
+        retry resumes exactly where this round left off.
 
         Returns True if a gap was detected and handled (caller MUST
         stop processing this activation immediately — everything has
@@ -47,7 +62,8 @@ class _ProtectionMixin:
             f"⚠️  [{self.name[:20]}] {side} gap-filled at {pos.price_open:.5f} — "
             f"{gap/self.pip_size:.1f} pips from the intended {intended_entry:.5f} "
             f"(tolerance {tolerance/self.pip_size:.1f}p for this rectangle's height) — "
-            f"closing both legs and resetting to retry on a clean touch", "ERROR"
+            f"closing both legs and retrying R{self.round} on a clean touch "
+            f"(cumulative_loss=${self.cumulative_loss:.2f} preserved, NOT reset)", "ERROR"
         )
 
         self._close_position_by_ticket(pos.ticket)
@@ -55,25 +71,59 @@ class _ProtectionMixin:
         # Abort the sibling leg too — whether it's still pending or
         # already a position, a clean pair needs both legs to start
         # from a valid, non-gapped state.
-        other_ticket     = self.sell_ticket if is_buy else self.buy_ticket
+        other_ticket = self.sell_ticket if is_buy else self.buy_ticket
         other_pos_ticket = self.sell_pos_ticket if is_buy else self.buy_pos_ticket
         if other_ticket:
             cancel_order(other_ticket)
         if other_pos_ticket and other_pos_ticket != pos.ticket:
             self._close_position_by_ticket(other_pos_ticket)
 
-        # NOT a finished cycle (win/loss/exhaustion) - just an invalid
-        # entry that should retry normally, so final=False (IDLE, not
-        # EXHAUSTED) - see reset()'s docstring for the distinction.
-        self.reset(final=False)
+        self._abort_gapped_round()
         return True
+
+    def _abort_gapped_round(self):
+        """
+        Clear ONLY the per-attempt order/position bookkeeping so this
+        rectangle goes back to IDLE and retries the CURRENT round on
+        the next clean touch — deliberately NOT the same as
+        reset(final=False), which also zeroes cumulative_loss, round,
+        touch_count, and buy_lot/sell_lot. None of that should be lost
+        just because one fill needed correcting; this round's progress
+        (lot size, touch count, and every real loss already taken)
+        carries forward unchanged into the retry.
+        """
+        for ticket in [self.buy_ticket, self.sell_ticket]:
+            if ticket:
+                cancel_order(ticket)
+        self.buy_ticket = None
+        self.sell_ticket = None
+        self.buy_pos_ticket = None
+        self.sell_pos_ticket = None
+        self.buy_sl = None
+        self.sell_sl = None
+        self.buy_r_frozen = 0.0
+        self.sell_r_frozen = 0.0
+        self.state = self.IDLE
+        self._buy_confirmed = False
+        self._sell_confirmed = False
+        self.risk_free_applied = {"buy": False, "sell": False}
+        self.loss_free_applied = {"buy": False, "sell": False}
+        self.override_r1_price = {"buy": None, "sell": None}
+        self.override_r2_price = {"buy": None, "sell": None}
+        # Deliberately UNCHANGED: cumulative_loss, round, touch_count,
+        # buy_lot, sell_lot, _pip_value_per_base_lot — see docstring.
+        self._log(
+            f"🔄  [{self.name[:20]}] gap-corrected — back to IDLE, will retry "
+            f"R{self.round} at lot={self.buy_lot:.2f}/{self.sell_lot:.2f} "
+            f"on the next clean touch (cumulative_loss=${self.cumulative_loss:.2f} kept)"
+        )
 
     def _check_balance_tp(self):
         if self.start_balance <= 0:
             return
         try:
-            ratio  = getattr(cfg, 'BALANCE_TP_RATIO', 1.10)
-            info   = mt5.account_info()
+            ratio = getattr(cfg, 'BALANCE_TP_RATIO', 1.10)
+            info = mt5.account_info()
             if not info:
                 return
             target = self.start_balance * ratio
@@ -96,7 +146,7 @@ class _ProtectionMixin:
             return
         try:
             ratio = getattr(cfg, 'HARD_STOP_LOSS_RATIO', 0.50)
-            info  = mt5.account_info()
+            info = mt5.account_info()
             if not info:
                 return
             floor = self.start_balance * (1.0 - ratio)
@@ -113,7 +163,7 @@ class _ProtectionMixin:
 
     def _close_all_and_stop(self):
         filling = _filling_mode(self.symbol)
-        tick    = mt5.symbol_info_tick(self.symbol)
+        tick = mt5.symbol_info_tick(self.symbol)
 
         # Close all open positions
         for p in (mt5.positions_get(symbol=self.symbol) or []):
@@ -148,7 +198,8 @@ class _ProtectionMixin:
         try:
             if _os.path.exists(_bal_file):
                 _os.remove(_bal_file)
-                self._log(f"🗑️  Cleared saved start balance (session complete)", "INFO")
+                self._log(
+                    f"🗑️  Cleared saved start balance (session complete)", "INFO")
         except Exception:
             pass
 
@@ -206,11 +257,15 @@ class _ProtectionMixin:
                 if profit_dist >= trigger_r * r:
                     clamped = False
                     if self.override_r1_price.get("buy") is not None:
-                        new_sl = _round_price(self.override_r1_price["buy"], self.symbol)
+                        new_sl = _round_price(
+                            self.override_r1_price["buy"], self.symbol)
                     else:
-                        lock_dist = self._risk_free_lock_distance(r, pos.volume)
-                        new_sl = _round_price(pos.price_open + lock_dist, self.symbol)
-                        new_sl, clamped = self._clamp_sl_to_valid_range(new_sl, pos, is_buy=True)
+                        lock_dist = self._risk_free_lock_distance(
+                            r, pos.volume)
+                        new_sl = _round_price(
+                            pos.price_open + lock_dist, self.symbol)
+                        new_sl, clamped = self._clamp_sl_to_valid_range(
+                            new_sl, pos, is_buy=True)
                         if clamped:
                             self._log(
                                 f"⚠️  [{self.name[:20]}] BUY loss-free lock distance "
@@ -241,11 +296,15 @@ class _ProtectionMixin:
                 if profit_dist >= trigger_r * r:
                     clamped = False
                     if self.override_r1_price.get("sell") is not None:
-                        new_sl = _round_price(self.override_r1_price["sell"], self.symbol)
+                        new_sl = _round_price(
+                            self.override_r1_price["sell"], self.symbol)
                     else:
-                        lock_dist = self._risk_free_lock_distance(r, pos.volume)
-                        new_sl = _round_price(pos.price_open - lock_dist, self.symbol)
-                        new_sl, clamped = self._clamp_sl_to_valid_range(new_sl, pos, is_buy=False)
+                        lock_dist = self._risk_free_lock_distance(
+                            r, pos.volume)
+                        new_sl = _round_price(
+                            pos.price_open - lock_dist, self.symbol)
+                        new_sl, clamped = self._clamp_sl_to_valid_range(
+                            new_sl, pos, is_buy=False)
                         if clamped:
                             self._log(
                                 f"⚠️  [{self.name[:20]}] SELL loss-free lock distance "
@@ -274,13 +333,15 @@ class _ProtectionMixin:
             pos = sorted(buy_pos, key=lambda p: p.time, reverse=True)[0]
             ov = self.override_r1_price.get("buy")
             if ov is not None and abs(pos.sl - ov) > self.pip_size * 0.9:
-                self._move_position_sl(pos.ticket, _round_price(ov, self.symbol))
+                self._move_position_sl(
+                    pos.ticket, _round_price(ov, self.symbol))
 
         if self.loss_free_applied.get("sell", False) and sell_pos:
             pos = sorted(sell_pos, key=lambda p: p.time, reverse=True)[0]
             ov = self.override_r1_price.get("sell")
             if ov is not None and abs(pos.sl - ov) > self.pip_size * 0.9:
-                self._move_position_sl(pos.ticket, _round_price(ov, self.symbol))
+                self._move_position_sl(
+                    pos.ticket, _round_price(ov, self.symbol))
 
     def _check_risk_free(self, buy_pos: list, sell_pos: list):
         """
@@ -353,11 +414,15 @@ class _ProtectionMixin:
                     new_sl = None
                     clamped = False
                     if self.override_r2_price.get("buy") is not None:
-                        new_sl = _round_price(self.override_r2_price["buy"], self.symbol)
+                        new_sl = _round_price(
+                            self.override_r2_price["buy"], self.symbol)
                     else:
-                        lock_dist = self._risk_free_lock_distance(r, lot_for_lock, multiplier=2.0)
-                        new_sl = _round_price(pos.price_open + lock_dist, self.symbol)
-                        new_sl, clamped = self._clamp_sl_to_valid_range(new_sl, pos, is_buy=True)
+                        lock_dist = self._risk_free_lock_distance(
+                            r, lot_for_lock, multiplier=2.0)
+                        new_sl = _round_price(
+                            pos.price_open + lock_dist, self.symbol)
+                        new_sl, clamped = self._clamp_sl_to_valid_range(
+                            new_sl, pos, is_buy=True)
                         if clamped:
                             self._log(
                                 f"⚠️  [{self.name[:20]}] BUY risk-free lock distance "
@@ -395,11 +460,15 @@ class _ProtectionMixin:
                             lot_for_lock = remain
                     clamped = False
                     if self.override_r2_price.get("sell") is not None:
-                        new_sl = _round_price(self.override_r2_price["sell"], self.symbol)
+                        new_sl = _round_price(
+                            self.override_r2_price["sell"], self.symbol)
                     else:
-                        lock_dist = self._risk_free_lock_distance(r, lot_for_lock, multiplier=2.0)
-                        new_sl = _round_price(pos.price_open - lock_dist, self.symbol)
-                        new_sl, clamped = self._clamp_sl_to_valid_range(new_sl, pos, is_buy=False)
+                        lock_dist = self._risk_free_lock_distance(
+                            r, lot_for_lock, multiplier=2.0)
+                        new_sl = _round_price(
+                            pos.price_open - lock_dist, self.symbol)
+                        new_sl, clamped = self._clamp_sl_to_valid_range(
+                            new_sl, pos, is_buy=False)
                         if clamped:
                             self._log(
                                 f"⚠️  [{self.name[:20]}] SELL risk-free lock distance "
@@ -428,13 +497,15 @@ class _ProtectionMixin:
             pos = sorted(buy_pos, key=lambda p: p.time, reverse=True)[0]
             ov = self.override_r2_price.get("buy")
             if ov is not None and abs(pos.sl - ov) > self.pip_size * 0.9:
-                self._move_position_sl(pos.ticket, _round_price(ov, self.symbol))
+                self._move_position_sl(
+                    pos.ticket, _round_price(ov, self.symbol))
 
         if self.risk_free_applied.get("sell", False) and sell_pos:
             pos = sorted(sell_pos, key=lambda p: p.time, reverse=True)[0]
             ov = self.override_r2_price.get("sell")
             if ov is not None and abs(pos.sl - ov) > self.pip_size * 0.9:
-                self._move_position_sl(pos.ticket, _round_price(ov, self.symbol))
+                self._move_position_sl(
+                    pos.ticket, _round_price(ov, self.symbol))
 
     def revert_loss_free(self):
         """
@@ -456,10 +527,10 @@ class _ProtectionMixin:
         R2/risk-free does) — only the SL itself is reverted here.
         """
         try:
-            buy_pos  = [p for p in (mt5.positions_get(symbol=self.symbol) or [])
+            buy_pos = [p for p in (mt5.positions_get(symbol=self.symbol) or [])
                        if p.ticket == self.buy_pos_ticket]
             sell_pos = [p for p in (mt5.positions_get(symbol=self.symbol) or [])
-                       if p.ticket == self.sell_pos_ticket]
+                        if p.ticket == self.sell_pos_ticket]
         except Exception:
             buy_pos, sell_pos = [], []
 
@@ -471,8 +542,10 @@ class _ProtectionMixin:
                     self._log(f"🟩  [{self.name[:20]}] Loss-Free disabled — BUY left alone "
                               f"(Risk-Free is already in control of this side's SL)")
                 elif buy_pos:
-                    self._move_position_sl(buy_pos[0].ticket, self._buy_sl_price)
-                    self._log(f"🟩  [{self.name[:20]}] Loss-Free disabled — BUY SL reverted to rectangle edge")
+                    self._move_position_sl(
+                        buy_pos[0].ticket, self._buy_sl_price)
+                    self._log(
+                        f"🟩  [{self.name[:20]}] Loss-Free disabled — BUY SL reverted to rectangle edge")
                 else:
                     self._log(f"⚠️  [{self.name[:20]}] Loss-Free disabled — BUY flag cleared but no "
                               f"open position found for ticket {self.buy_pos_ticket} (already closed?)", "WARN")
@@ -493,8 +566,10 @@ class _ProtectionMixin:
                     self._log(f"🟩  [{self.name[:20]}] Loss-Free disabled — SELL left alone "
                               f"(Risk-Free is already in control of this side's SL)")
                 elif sell_pos:
-                    self._move_position_sl(sell_pos[0].ticket, self._sell_sl_price)
-                    self._log(f"🟩  [{self.name[:20]}] Loss-Free disabled — SELL SL reverted to rectangle edge")
+                    self._move_position_sl(
+                        sell_pos[0].ticket, self._sell_sl_price)
+                    self._log(
+                        f"🟩  [{self.name[:20]}] Loss-Free disabled — SELL SL reverted to rectangle edge")
                 else:
                     self._log(f"⚠️  [{self.name[:20]}] Loss-Free disabled — SELL flag cleared but no "
                               f"open position found for ticket {self.sell_pos_ticket} (already closed?)", "WARN")
@@ -519,10 +594,10 @@ class _ProtectionMixin:
         SL on whatever volume remains gets reverted.
         """
         try:
-            buy_pos  = [p for p in (mt5.positions_get(symbol=self.symbol) or [])
+            buy_pos = [p for p in (mt5.positions_get(symbol=self.symbol) or [])
                        if p.ticket == self.buy_pos_ticket]
             sell_pos = [p for p in (mt5.positions_get(symbol=self.symbol) or [])
-                       if p.ticket == self.sell_pos_ticket]
+                        if p.ticket == self.sell_pos_ticket]
         except Exception:
             buy_pos, sell_pos = [], []
 
@@ -534,15 +609,17 @@ class _ProtectionMixin:
                     pos = buy_pos[0]
                     if self._loss_free_enabled and self.loss_free_applied.get("buy", False):
                         r = self.buy_r_frozen
-                        lock_dist = self._risk_free_lock_distance(r, pos.volume, multiplier=1.0)
+                        lock_dist = self._risk_free_lock_distance(
+                            r, pos.volume, multiplier=1.0)
                         fallback_sl, _c = self._clamp_sl_to_valid_range(
                             _round_price(pos.price_open + lock_dist, self.symbol), pos, is_buy=True)
                         self._move_position_sl(pos.ticket, fallback_sl)
                         self._log(f"🛡️  [{self.name[:20]}] Risk-Free disabled — BUY SL fell back "
-                                 f"to Loss-Free's lock at {fallback_sl:.5f} (still enabled)")
+                                  f"to Loss-Free's lock at {fallback_sl:.5f} (still enabled)")
                     else:
                         self._move_position_sl(pos.ticket, self._buy_sl_price)
-                        self._log(f"🛡️  [{self.name[:20]}] Risk-Free disabled — BUY SL reverted to rectangle edge")
+                        self._log(
+                            f"🛡️  [{self.name[:20]}] Risk-Free disabled — BUY SL reverted to rectangle edge")
                 else:
                     self._log(f"⚠️  [{self.name[:20]}] Risk-Free disabled — BUY flag cleared but no "
                               f"open position found for ticket {self.buy_pos_ticket} (already closed?)", "WARN")
@@ -561,15 +638,17 @@ class _ProtectionMixin:
                     pos = sell_pos[0]
                     if self._loss_free_enabled and self.loss_free_applied.get("sell", False):
                         r = self.sell_r_frozen
-                        lock_dist = self._risk_free_lock_distance(r, pos.volume, multiplier=1.0)
+                        lock_dist = self._risk_free_lock_distance(
+                            r, pos.volume, multiplier=1.0)
                         fallback_sl, _c = self._clamp_sl_to_valid_range(
                             _round_price(pos.price_open - lock_dist, self.symbol), pos, is_buy=False)
                         self._move_position_sl(pos.ticket, fallback_sl)
                         self._log(f"🛡️  [{self.name[:20]}] Risk-Free disabled — SELL SL fell back "
-                                 f"to Loss-Free's lock at {fallback_sl:.5f} (still enabled)")
+                                  f"to Loss-Free's lock at {fallback_sl:.5f} (still enabled)")
                     else:
                         self._move_position_sl(pos.ticket, self._sell_sl_price)
-                        self._log(f"🛡️  [{self.name[:20]}] Risk-Free disabled — SELL SL reverted to rectangle edge")
+                        self._log(
+                            f"🛡️  [{self.name[:20]}] Risk-Free disabled — SELL SL reverted to rectangle edge")
                 else:
                     self._log(f"⚠️  [{self.name[:20]}] Risk-Free disabled — SELL flag cleared but no "
                               f"open position found for ticket {self.sell_pos_ticket} (already closed?)", "WARN")
@@ -601,9 +680,9 @@ class _ProtectionMixin:
             step = getattr(info, "volume_step", 0.01) or 0.01
             vmin = getattr(info, "volume_min", 0.01) or 0.01
 
-            raw_close  = pos.volume * close_fraction
-            close_vol  = round(raw_close / step) * step
-            close_vol  = round(close_vol, 2)
+            raw_close = pos.volume * close_fraction
+            close_vol = round(raw_close / step) * step
+            close_vol = round(close_vol, 2)
             remain_vol = round(pos.volume - close_vol, 2)
 
             if close_vol < vmin or remain_vol < vmin:
@@ -616,8 +695,8 @@ class _ProtectionMixin:
                 )
                 return None
 
-            is_buy  = pos.type == 0
-            tick    = mt5.symbol_info_tick(self.symbol)
+            is_buy = pos.type == 0
+            tick = mt5.symbol_info_tick(self.symbol)
             filling = _filling_mode(self.symbol)
             res = mt5.order_send({
                 "action":       mt5.TRADE_ACTION_DEAL,
