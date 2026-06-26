@@ -236,7 +236,7 @@ class WatcherThread(threading.Thread):
     def __init__(self, symbol: str, lot_size: float,
                  follow_enabled: bool = True, resume_enabled: bool = False,
                  risk_free_enabled: bool = False, loss_free_enabled: bool = False,
-                 soft_lot_mode: int = 1):
+                 soft_lot_mode: int = 1, tp_free: bool = False):
         super().__init__(daemon=True)
         self.symbol = symbol
         self.lot_size = lot_size
@@ -246,6 +246,7 @@ class WatcherThread(threading.Thread):
         self._loss_free_enabled = loss_free_enabled
         self._soft_lot_mode = soft_lot_mode if soft_lot_mode in (
             1, 2, 3) else 1
+        self._tp_free = tp_free
         self.sig = WatcherSignals()
         self._stop_event = threading.Event()
         self._sources: dict[str, SourceState] = {}
@@ -569,6 +570,7 @@ class WatcherThread(threading.Thread):
                         risk_free_enabled=self._risk_free_enabled,
                         loss_free_enabled=self._loss_free_enabled,
                         soft_lot_mode=self._soft_lot_mode,
+                        tp_free=self._tp_free,
                     )
                     state.registered_at = cur_t
                     state.last_prev_t = prev_t
@@ -607,11 +609,20 @@ class WatcherThread(threading.Thread):
                         self._missing_counts.pop(n, None)
 
                 # ── Moved/resized rectangles ───────────────────────
-                # If the trader drags or resizes their rectangle while
-                # it's still IDLE (no orders placed yet), reset and
-                # re-register at the new edges. Rectangles with active
-                # cycles are left alone (the cycle must complete
-                # naturally at its original fixed edges).
+                # Handles two cases:
+                #
+                # Case A (IDLE): rectangle moved before any orders —
+                #   reset & re-register at the new edges (unchanged).
+                #
+                # Case B (EXHAUSTED): cycle finished (TP/SL) and the
+                #   trader has moved the rectangle to a new zone for
+                #   the next setup. Previously this was a dead end —
+                #   state was EXHAUSTED so the IDLE check blocked it,
+                #   and the name was already in _seen so new-rectangle
+                #   registration also skipped it. Fix: detect the
+                #   position change for EXHAUSTED rectangles and
+                #   fully rebuild the SourceState so it becomes IDLE
+                #   and can be touched again — no restart required.
                 if self.follow_enabled:
                     for o in objects:
                         n = o.name
@@ -620,12 +631,13 @@ class WatcherThread(threading.Thread):
                         if n.startswith("RESUMED_"):
                             continue
                         state = self._sources[n]
-                        if state.state != SourceState.IDLE:
-                            continue
                         if not (o.is_rectangle and o.rect_valid):
                             continue
-                        if (abs(o.rect_top - state.rect_top) > 1e-6
-                                or abs(o.rect_bottom - state.rect_bottom) > 1e-6):
+                        moved = (abs(o.rect_top - state.rect_top) > 1e-6
+                                 or abs(o.rect_bottom - state.rect_bottom) > 1e-6)
+
+                        if state.state == SourceState.IDLE and moved:
+                            # Case A: idle, just update edges & reseed
                             self.log(
                                 f"↕️  [{n[:25]}] rectangle moved/resized "
                                 f"[{state.rect_bottom:.5f}-{state.rect_top:.5f}]→"
@@ -636,13 +648,46 @@ class WatcherThread(threading.Thread):
                             state.rect_bottom = o.rect_bottom
                             state.registered_at = cur_t
                             state.last_prev_t = prev_t
-                            # Re-seed tick price at the new edges so the
-                            # moved rectangle doesn't immediately register
-                            # a false "crossing" relative to its old edges.
                             if tick:
                                 state._prev_tick_price = (
                                     tick.bid + tick.ask) / 2
                             self._missing_counts.pop(n, None)
+
+                        elif state.state == SourceState.EXHAUSTED and moved:
+                            # Case B: cycle done, rectangle moved to new zone.
+                            # Re-create the SourceState from scratch so it
+                            # becomes IDLE and can be traded again immediately.
+                            self.log(
+                                f"🔁  [{n[:25]}] rectangle moved after cycle end "
+                                f"[{state.rect_bottom:.5f}-{state.rect_top:.5f}]→"
+                                f"[{o.rect_bottom:.5f}-{o.rect_top:.5f}] — re-registering"
+                            )
+                            new_state = SourceState(
+                                name=n,
+                                rect_top=o.rect_top,
+                                rect_bottom=o.rect_bottom,
+                                pip_size=pip,
+                                symbol=self.symbol,
+                                base_lot=self.lot_size,
+                                start_balance=self._start_balance,
+                                log_fn=self.log,
+                                stop_fn=self._on_balance_tp,
+                                risk_free_enabled=self._risk_free_enabled,
+                                loss_free_enabled=self._loss_free_enabled,
+                                soft_lot_mode=self._soft_lot_mode,
+                                tp_free=self._tp_free,
+                            )
+                            new_state.registered_at = cur_t
+                            new_state.last_prev_t = prev_t
+                            if tick:
+                                new_state._prev_tick_price = (
+                                    tick.bid + tick.ask) / 2
+                            self._sources[n] = new_state
+                            self._missing_counts.pop(n, None)
+                            self.log(
+                                f"🆕  [{n[:25]}] rect=[{o.rect_bottom:.5f}-{o.rect_top:.5f}] "
+                                f"re-registered | waiting for touch"
+                            )
 
                 # ── Touch detection (tick-based, timeframe-immune) ─
                 # Uses live bid/ask via SourceState.check_touch() instead

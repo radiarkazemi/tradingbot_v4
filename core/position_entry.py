@@ -88,11 +88,23 @@ class _EntryMixin:
 
     def place_initial_pair(self):
         if self.round == 0:
-            # Genuinely fresh start for this rectangle.
-            self.round = 1
-            self.touch_count = 0
-            self.buy_lot = self.base_lot
-            self.sell_lot = self.base_lot
+            # ── Check for a saved session for this rectangle ──────
+            # Even when resume_enabled=False, the session file records
+            # touch_count/round/lots/cumulative_loss after every loss.
+            # If the bot was restarted mid-cycle (crash, manual stop,
+            # PC reboot) we MUST restore that progress so the next
+            # touch uses the correct lot — not restart from 0.01.
+            # This is different from full resume (which restores live
+            # MT5 positions too); here we only restore the counters
+            # so place_initial_pair places the right lot on a clean
+            # first touch of the rectangle after restart.
+            restored = self._try_restore_session_counters()
+            if not restored:
+                # Truly fresh — no prior session for this rectangle.
+                self.round = 1
+                self.touch_count = 0
+                self.buy_lot = self.base_lot
+                self.sell_lot = self.base_lot
         # else: round > 0 means this is a RETRY after a gap-correction
         # (_abort_gapped_round — see position_protection.py) mid-cycle,
         # not a fresh start. Deliberately do NOT reset round/touch_count/

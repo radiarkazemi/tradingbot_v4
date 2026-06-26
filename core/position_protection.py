@@ -22,64 +22,146 @@ class _ProtectionMixin:
     def _check_entry_gap(self, pos, intended_entry: float, is_buy: bool) -> bool:
         """
         Detects a candle-gap fill (this leg filled meaningfully far
-        from the rectangle edge it was supposed to enter at — a real
-        price gap between ticks/bars, not the few-point broker
-        slippage that's normal and already handled by SL always
-        pinning to the rectangle edge regardless of fill price). If
-        detected: close this leg AND its sibling immediately, then
-        retry the SAME round on a future clean touch — by explicit
-        request, rather than running the whole recovery cycle on a
-        structurally invalid entry.
+        from the rectangle edge it was supposed to enter at).
 
-        IMPORTANT — does NOT call reset()/reset(final=False): that
-        method unconditionally zeroes cumulative_loss, round,
-        touch_count, and buy_lot/sell_lot back to base_lot. Calling it
-        here would silently erase the running tally of every real
-        loss taken so far this cycle — exactly the number the
-        eventual TP target is computed to cover — the instant a
-        single gap-filled entry happened to need correcting, even
-        deep into a recovery sequence. The trader would see the
-        rectangle 'win' later while the account is actually still net
-        down by everything that was wiped. Uses
-        _abort_gapped_round() instead, which clears only the per-
-        attempt order/position bookkeeping and explicitly preserves
-        cumulative_loss/round/touch_count/buy_lot/sell_lot so the
-        retry resumes exactly where this round left off.
+        NEW BEHAVIOUR (replacing the old close-both-legs logic):
+        ─────────────────────────────────────────────────────────
+        • If the position is ALREADY ACTIVE (confirmed) — the other
+          leg has already been confirmed too — we leave it completely
+          alone. The cycle is live; disturbing it would make things
+          worse. Returns False so normal processing continues.
 
-        Returns True if a gap was detected and handled (caller MUST
-        stop processing this activation immediately — everything has
-        just been closed/reset), False if the fill was within normal
-        tolerance and processing should continue as usual.
+        • If the position just filled but the SIBLING is still a
+          PENDING stop order — we modify the pending order's entry
+          price to the rectangle edge (the intended entry) instead of
+          cancelling it. The gapped leg itself is left running; its SL
+          is already pinned to the rectangle edge by _resync_open_sl
+          on every scan, which corrects any structural gap for free.
+          Only the still-open pending order's price is fixed. Returns
+          False so normal processing continues (no round abort).
+
+        • If we cannot modify the pending order (broker rejection or
+          order already gone), we fall back to the old behaviour and
+          abort the round so the source retries cleanly.
+
+        Returns True ONLY if an unrecoverable gap was detected and the
+        round was aborted (caller MUST stop processing immediately).
+        Returns False in all other cases (normal processing continues).
         """
         height = self.rect_top - self.rect_bottom
         tolerance = height * getattr(cfg, "ENTRY_GAP_TOLERANCE_FRACTION", 0.20)
         gap = abs(pos.price_open - intended_entry)
         if gap <= tolerance:
-            return False
+            return False  # within tolerance — normal slippage, nothing to do
 
         side = "BUY" if is_buy else "SELL"
-        self._log(
-            f"⚠️  [{self.name[:20]}] {side} gap-filled at {pos.price_open:.5f} — "
-            f"{gap/self.pip_size:.1f} pips from the intended {intended_entry:.5f} "
-            f"(tolerance {tolerance/self.pip_size:.1f}p for this rectangle's height) — "
-            f"closing both legs and retrying R{self.round} on a clean touch "
-            f"(cumulative_loss=${self.cumulative_loss:.2f} preserved, NOT reset)", "ERROR"
-        )
 
+        # ── Case 1: sibling already confirmed (both legs active) ───
+        # The cycle is running with both positions live. Closing one
+        # now would leave an unhedged position — worse than doing
+        # nothing. Leave both alone; _resync_open_sl will keep each
+        # SL pinned to the rectangle edge every scan regardless.
+        sibling_confirmed = (
+            self._sell_confirmed if is_buy else self._buy_confirmed
+        )
+        if sibling_confirmed:
+            self._log(
+                f"ℹ️  [{self.name[:20]}] {side} gap-fill detected "
+                f"({gap/self.pip_size:.1f} pips, tolerance "
+                f"{tolerance/self.pip_size:.1f}p) but sibling already active — "
+                f"leaving both positions running, SL will self-correct via resync",
+                "INFO"
+            )
+            return False  # do NOT abort — let normal processing continue
+
+        # ── Case 2: sibling is still a pending stop order ──────────
+        # Modify the pending order's entry price to the intended
+        # (rectangle-edge) price so it fills at the correct level on
+        # the next touch rather than at a gapped price.
+        sibling_ticket = self.sell_ticket if is_buy else self.buy_ticket
+        sibling_sl = self._sell_sl_price if is_buy else self._buy_sl_price
+        sibling_entry = self._sell_entry if is_buy else self._buy_entry
+
+        if sibling_ticket:
+            self._log(
+                f"⚠️  [{self.name[:20]}] {side} gap-filled at "
+                f"{pos.price_open:.5f} — {gap/self.pip_size:.1f} pips from "
+                f"intended {intended_entry:.5f} (tolerance "
+                f"{tolerance/self.pip_size:.1f}p) — modifying sibling pending "
+                f"order #{sibling_ticket} to rectangle edge (no close/reset)",
+                "WARN"
+            )
+            # Attempt to modify the pending order's price back to the
+            # rectangle edge. This is a no-op cost-wise if it was
+            # already there; it fixes it if the gap shifted it.
+            modified = self._modify_pending_entry(
+                sibling_ticket, sibling_entry, sibling_sl)
+            if modified:
+                self._log(
+                    f"✅  [{self.name[:20]}] sibling order #{sibling_ticket} "
+                    f"entry corrected to {sibling_entry:.5f} — cycle continues",
+                    "INFO"
+                )
+                return False  # successfully corrected — continue normally
+            else:
+                # Modification failed — fall through to abort
+                self._log(
+                    f"⚠️  [{self.name[:20]}] could not modify sibling order "
+                    f"#{sibling_ticket} — falling back to round abort",
+                    "WARN"
+                )
+
+        # ── Case 3: fallback abort (no sibling or modification failed)
+        self._log(
+            f"⚠️  [{self.name[:20]}] {side} gap-fill unrecoverable — "
+            f"closing gapped leg and aborting round "
+            f"(cumulative_loss=${self.cumulative_loss:.2f} preserved)", "ERROR"
+        )
         self._close_position_by_ticket(pos.ticket)
 
-        # Abort the sibling leg too — whether it's still pending or
-        # already a position, a clean pair needs both legs to start
-        # from a valid, non-gapped state.
-        other_ticket = self.sell_ticket if is_buy else self.buy_ticket
-        other_pos_ticket = self.sell_pos_ticket if is_buy else self.buy_pos_ticket
-        if other_ticket:
-            cancel_order(other_ticket)
-        if other_pos_ticket and other_pos_ticket != pos.ticket:
-            self._close_position_by_ticket(other_pos_ticket)
+        # Cancel whatever sibling state exists
+        if sibling_ticket:
+            cancel_order(sibling_ticket)
+        sibling_pos_ticket = self.sell_pos_ticket if is_buy else self.buy_pos_ticket
+        if sibling_pos_ticket and sibling_pos_ticket != pos.ticket:
+            self._close_position_by_ticket(sibling_pos_ticket)
 
         self._abort_gapped_round()
         return True
+
+    def _modify_pending_entry(self, ticket: int, new_entry: float,
+                              new_sl: float) -> bool:
+        """
+        Modify a pending stop order's entry price (and SL) via
+        TRADE_ACTION_MODIFY. Used by gap correction to nudge a
+        sibling order back to the rectangle edge after the first
+        leg filled with a gap, without cancelling anything.
+
+        Returns True on success, False on failure.
+        """
+        try:
+            orders = mt5.orders_get(symbol=self.symbol) or []
+            target = next((o for o in orders if o.ticket == ticket), None)
+            if not target:
+                return False  # order already gone (filled or cancelled)
+
+            res = mt5.order_send({
+                "action":   mt5.TRADE_ACTION_MODIFY,
+                "order":    ticket,
+                "price":    new_entry,
+                "sl":       new_sl,
+                "tp":       target.tp,
+            })
+            if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                return True
+            self._log(
+                f"⚠️  [{self.name[:20]}] pending order modify failed "
+                f"#{ticket}: {getattr(res, 'comment', 'unknown')}", "WARN"
+            )
+            return False
+        except Exception as e:
+            log.warning("Pending order modify error: %s", e)
+            return False
 
     def _abort_gapped_round(self):
         """
@@ -214,35 +296,107 @@ class _ProtectionMixin:
         if self._stop_fn:
             self._stop_fn()
 
-    # ── Activation ────────────────────────────────────────────────
+    # ── R1 — Loss-Free ────────────────────────────────────────────
+    #
+    # WHAT IT DOES (reworked):
+    #   Once floating profit ≥ LOSS_FREE_TRIGGER_R (default 1R),
+    #   move the SL to a price that, if hit, would yield exactly
+    #   $0 net result for the session — i.e. the locked profit
+    #   exactly covers the cumulative_loss accumulated so far.
+    #
+    #   SL distance from entry = cumulative_loss / dollar_per_pip
+    #   expressed in price units.
+    #
+    #   If cumulative_loss is 0 (first round, nothing lost yet),
+    #   the SL is set to the position's own entry (true breakeven).
+    #
+    #   This is INDEPENDENT of Risk-Free (R2) — enabling/disabling
+    #   one has no effect on the other's SL calculation.
+    #
+    # ── R2 — Risk-Free ────────────────────────────────────────────
+    #
+    # WHAT IT DOES (reworked):
+    #   Once floating profit ≥ RISK_FREE_TRIGGER_R (default 2R),
+    #   move the SL to lock in 2× the loss-free distance:
+    #
+    #   SL distance = loss_free_distance × 2
+    #
+    #   where loss_free_distance is the same formula as R1 above.
+    #   This guarantees the locked profit covers TWICE the session
+    #   loss — a meaningful buffer above pure breakeven.
+    #
+    #   R2 can also do a partial close (PARTIAL_EXIT_ENABLED) before
+    #   moving the SL, same as before.
+    #
+    #   Completely independent of R1: if R1 is disabled, R2 still
+    #   calculates its own distance using the same base formula.
+    #   If R2 fires after R1, it simply overwrites R1's SL with the
+    #   larger 2× value.
+
+    def _loss_free_lock_distance(self, lot: float) -> float:
+        """
+        Price distance (≥0) beyond entry for the Loss-Free (R1) SL.
+
+        Goal: SL at a price where, if hit, the position's profit exactly
+        covers any cumulative session losses → net session result = $0.
+
+        Formula:
+            distance = cumulative_loss / dollar_per_pip   (in price)
+
+        If cumulative_loss is 0 (first round, no prior losses):
+            distance = 0  →  SL lands exactly at entry (breakeven on
+            this trade, $0 locked above session baseline).
+
+        This is intentionally minimal — R1 just guarantees we can't
+        lose MORE than we've already lost in this session.
+        R2 adds a profit buffer on top of this.
+        """
+        dpp = self._dollar_per_pip(lot)
+        if dpp <= 0:
+            return 0.0
+        # Cover session losses (0 if none yet = entry breakeven)
+        loss_pips = max(0.0, self.cumulative_loss) / dpp
+        return loss_pips * self.pip_size
+
+    def _risk_free_lock_distance(self, lot: float, r_frozen: float) -> float:
+        """
+        Price distance (≥0) beyond entry for the Risk-Free (R2) SL.
+
+        Goal: lock a MEANINGFUL profit buffer regardless of session
+        history. Always at least 1R above entry, plus enough to cover
+        session losses.
+
+        Formula:
+            distance = max(1R, loss_free_distance + 1R)
+            where 1R = r_frozen (the rectangle height, which is the
+            distance from entry to SL — the natural risk unit).
+
+        Examples:
+            First round (cumulative_loss=0): distance = 1R
+                → SL at entry + 1R = guaranteed profit of 1R
+            After $10 loss, 1R=$5: loss_free = 2 pips, 1R = 26 pips
+                → distance = 28 pips → SL covers $10 loss + 1R profit
+        """
+        loss_free = self._loss_free_lock_distance(lot)
+        # 1R in price units
+        r_in_price = r_frozen  # r_frozen is already in price (abs SL distance)
+        return loss_free + r_in_price
 
     def _check_loss_free(self, buy_pos: list, sell_pos: list):
         """
-        R1 — Loss-Free. Once an open position's floating profit
-        reaches LOSS_FREE_TRIGGER_R (default 1R), move its SL far
-        enough to cover ALL cumulative losses taken so far this
-        session/cycle, PLUS this round's own risk — the exact same
-        loss-covering formula R2 (risk-free) uses (see
-        _risk_free_lock_distance), just triggered earlier (1R instead
-        of 2R) and with no partial exit (that's exclusively R2's).
+        R1 — Loss-Free. Completely independent of R2 (Risk-Free).
 
-        This guarantees strictly more than plain breakeven: even in
-        the worst case (the full cumulative amount isn't reachable
-        yet at this profit level), _clamp_sl_to_valid_range never lets
-        the result fall below the position's own entry, so "loss-free"
-        is still always at least true — it just won't always cover
-        100% of the session's losses if 1R alone isn't far enough yet.
+        Trigger: floating profit ≥ LOSS_FREE_TRIGGER_R × frozen_R.
+        Action:  move SL to entry + _loss_free_lock_distance(lot),
+                 which locks exactly enough profit to cover all
+                 cumulative session losses (net result = $0).
+                 If no losses yet, SL goes to entry (breakeven).
 
-        Mirrors _check_risk_free's structure exactly, one trigger
-        level lower. If R2 later also fires for the same side, it
-        simply overwrites the SL again (R2 owns the SL once
-        triggered — see the skip guards in _resync_open_sl/tp).
+        Does NOT use _risk_free_lock_distance — the two features
+        have completely separate formulas and do not call each other.
 
-        Item 9: once applied, the trader can drag the bot-drawn
-        TB4_R1_<name> chart rectangle to a different price; the
-        watcher reads it back each scan into
-        self.override_r1_price[side], and that value is used here
-        instead of recalculating, for as long as it stays != None.
+        Item 9: trader-draggable chart line override still works —
+        if override_r1_price is set, that price is used as-is.
         """
         if not self._loss_free_enabled:
             return
@@ -260,31 +414,29 @@ class _ProtectionMixin:
                         new_sl = _round_price(
                             self.override_r1_price["buy"], self.symbol)
                     else:
-                        lock_dist = self._risk_free_lock_distance(
-                            r, pos.volume)
+                        lock_dist = self._loss_free_lock_distance(pos.volume)
                         new_sl = _round_price(
                             pos.price_open + lock_dist, self.symbol)
                         new_sl, clamped = self._clamp_sl_to_valid_range(
                             new_sl, pos, is_buy=True)
                         if clamped:
                             self._log(
-                                f"⚠️  [{self.name[:20]}] BUY loss-free lock distance "
-                                f"clamped to {new_sl:.5f} — full cumulative_loss coverage "
-                                f"isn't reachable yet at this profit level; locking the "
-                                f"best achievable amount instead of nothing "
-                                f"(still ≥ breakeven)", "WARN"
+                                f"⚠️  [{self.name[:20]}] BUY loss-free SL clamped "
+                                f"to {new_sl:.5f} — full session-loss coverage not yet "
+                                f"reachable; locking best achievable (still ≥ breakeven)",
+                                "WARN"
                             )
                     if self._move_position_sl(pos.ticket, new_sl):
                         self.loss_free_applied["buy"] = True
-                        coverage_note = (
-                            "partial — see clamp warning above, still ≥ breakeven"
-                            if clamped else
-                            f"covers cumulative_loss=${self.cumulative_loss:.2f} + this round's risk"
+                        coverage = (
+                            "partial (clamped)" if clamped else
+                            (f"SL at entry (breakeven)" if self.cumulative_loss <= 0 else
+                             f"covers session losses ${self.cumulative_loss:.2f} → net $0")
                         )
                         self._log(
                             f"🟩  [{self.name[:20]}] BUY loss-free (R1) | "
                             f"profit={profit_dist:.5f} ≥ {trigger_r}R={trigger_r*r:.5f} | "
-                            f"SL moved to {new_sl:.5f} ({coverage_note})", "NEW"
+                            f"SL → {new_sl:.5f} ({coverage})", "NEW"
                         )
 
         if (sell_pos and not self.loss_free_applied.get("sell", False)
@@ -299,36 +451,32 @@ class _ProtectionMixin:
                         new_sl = _round_price(
                             self.override_r1_price["sell"], self.symbol)
                     else:
-                        lock_dist = self._risk_free_lock_distance(
-                            r, pos.volume)
+                        lock_dist = self._loss_free_lock_distance(pos.volume)
                         new_sl = _round_price(
                             pos.price_open - lock_dist, self.symbol)
                         new_sl, clamped = self._clamp_sl_to_valid_range(
                             new_sl, pos, is_buy=False)
                         if clamped:
                             self._log(
-                                f"⚠️  [{self.name[:20]}] SELL loss-free lock distance "
-                                f"clamped to {new_sl:.5f} — full cumulative_loss coverage "
-                                f"isn't reachable yet at this profit level; locking the "
-                                f"best achievable amount instead of nothing "
-                                f"(still ≥ breakeven)", "WARN"
+                                f"⚠️  [{self.name[:20]}] SELL loss-free SL clamped "
+                                f"to {new_sl:.5f} — full session-loss coverage not yet "
+                                f"reachable; locking best achievable (still ≥ breakeven)",
+                                "WARN"
                             )
                     if self._move_position_sl(pos.ticket, new_sl):
                         self.loss_free_applied["sell"] = True
-                        coverage_note = (
-                            "partial — see clamp warning above, still ≥ breakeven"
-                            if clamped else
-                            f"covers cumulative_loss=${self.cumulative_loss:.2f} + this round's risk"
+                        coverage = (
+                            "partial (clamped)" if clamped else
+                            (f"SL at entry (breakeven)" if self.cumulative_loss <= 0 else
+                             f"covers session losses ${self.cumulative_loss:.2f} → net $0")
                         )
                         self._log(
                             f"🟩  [{self.name[:20]}] SELL loss-free (R1) | "
                             f"profit={profit_dist:.5f} ≥ {trigger_r}R={trigger_r*r:.5f} | "
-                            f"SL moved to {new_sl:.5f} ({coverage_note})", "NEW"
+                            f"SL → {new_sl:.5f} ({coverage})", "NEW"
                         )
 
         # ── Trader-adjusted override, post-application ─────────────
-        # Once R1 is applied, keep tracking the chart line in case the
-        # trader drags it to a different price (item 9).
         if self.loss_free_applied.get("buy", False) and buy_pos:
             pos = sorted(buy_pos, key=lambda p: p.time, reverse=True)[0]
             ov = self.override_r1_price.get("buy")
@@ -345,55 +493,23 @@ class _ProtectionMixin:
 
     def _check_risk_free(self, buy_pos: list, sell_pos: list):
         """
-        R2 — Risk-Free + Partial Exit. Once an open position's
-        floating profit reaches RISK_FREE_TRIGGER_R (default 2R):
+        R2 — Risk-Free. Completely independent of R1 (Loss-Free).
 
-          1. If PARTIAL_EXIT_ENABLED, immediately close
-             PARTIAL_EXIT_RATIO (default 70%) of the position's
-             volume as a real deal — banking that profit right now,
-             not just on paper.
-          2. Move the SL on whatever volume remains (the full
-             position if partial exit was skipped/unavailable at
-             this size) to lock in enough profit to cover ALL
-             cumulative losses taken so far this cycle PLUS this
-             round's own risk — not just a flat +1R. A flat +1R badly
-             under-covers deep runs: by the time lot has grown
-             several touches, cumulative_loss can be many multiples
-             of any single round's R.
+        Trigger: floating profit ≥ RISK_FREE_TRIGGER_R (default 2R).
 
-        The remaining volume keeps running toward R3 (TP) with its
-        SL already locked — a classic scale-out: bank most of the
-        winner now, let a smaller "runner" chase the bigger target.
+        Action:
+          1. Optional partial close (PARTIAL_EXIT_ENABLED) — same as
+             before, banks real profit immediately.
+          2. Move SL to entry + (_loss_free_lock_distance × 2).
+             This locks 2× the session-loss-covering amount, giving
+             a meaningful profit buffer above pure breakeven.
 
-        TRIGGER uses the position's own frozen R (self.buy_r_frozen/
-        sell_r_frozen) — that's the right basis for "has this round
-        itself moved favorably enough to act."
+        The 2× factor is applied to the SAME base formula as R1 —
+        they are strictly independent: R2 does NOT read R1's state,
+        and disabling R1 has zero effect on R2's calculation.
 
-        LOCK-IN AMOUNT (how far to move SL) uses:
-            total_at_risk_dollars = cumulative_loss + (R in dollars
-                                    at the position's own lot)
-        converted to a price distance via the REAL dollar-per-pip at
-        the REMAINING lot (post-partial-close, if it happened), so
-        the dollar amount actually locked in still matches the real
-        cumulative loss regardless of how much volume is left.
-
-        IMPORTANT (lessons from an earlier, buggy prototype of partial
-        exit): the remaining/reduced volume after a partial close is
-        used ONLY for this lock-distance calculation. It must NEVER
-        be used to size the next round's order — that's controlled
-        exclusively by the soft-lot table indexed by touch_count
-        (see _next_table_lot), completely independent of any live
-        position's volume. Don't wire pos.volume into that path.
-
-        Item 9: once applied, the trader can drag the bot-drawn
-        TB4_R2_<name> chart rectangle; the watcher reads it back into
-        self.override_r2_price[side] each scan, and that value is
-        used instead of the calculated lock price for as long as
-        it's set.
-
-        R is read from self.buy_r_frozen/sell_r_frozen — frozen ONCE
-        at position-confirmation time (see _check_legs), not
-        recomputed from the live, continuously-resynced pos.sl field.
+        Item 9: trader-draggable override (override_r2_price) still
+        works — if set, that price is used directly.
         """
         if not self._risk_free_enabled:
             return
@@ -411,39 +527,37 @@ class _ProtectionMixin:
                             pos.ticket, getattr(cfg, "PARTIAL_EXIT_RATIO", 0.70))
                         if remain is not None:
                             lot_for_lock = remain
-                    new_sl = None
                     clamped = False
                     if self.override_r2_price.get("buy") is not None:
                         new_sl = _round_price(
                             self.override_r2_price["buy"], self.symbol)
                     else:
+                        # R2: lock session losses + 1R profit buffer
                         lock_dist = self._risk_free_lock_distance(
-                            r, lot_for_lock, multiplier=2.0)
+                            lot_for_lock, r)
                         new_sl = _round_price(
                             pos.price_open + lock_dist, self.symbol)
                         new_sl, clamped = self._clamp_sl_to_valid_range(
                             new_sl, pos, is_buy=True)
                         if clamped:
                             self._log(
-                                f"⚠️  [{self.name[:20]}] BUY risk-free lock distance "
-                                f"clamped to {new_sl:.5f} — the full cumulative-loss-"
-                                f"covering amount would have put SL on the wrong side "
-                                f"of current price/TP (this is the fix for an earlier "
-                                f"'Invalid stops' loop on small remaining lots after a "
-                                f"partial exit); locking the best achievable amount "
-                                f"instead of nothing", "WARN"
+                                f"⚠️  [{self.name[:20]}] BUY risk-free SL clamped "
+                                f"to {new_sl:.5f} — R2 distance overshoots current "
+                                f"price; locking best achievable amount", "WARN"
                             )
                     if self._move_position_sl(pos.ticket, new_sl):
                         self.risk_free_applied["buy"] = True
-                        coverage_note = (
-                            "partial — see clamp warning above, still ≥ breakeven"
-                            if clamped else
-                            f"2× cumulative_loss=${self.cumulative_loss:.2f} + this round's risk"
+                        locked_profit = lock_dist / self.pip_size * \
+                            self._dollar_per_pip(lot_for_lock)
+                        coverage = (
+                            "partial (clamped)" if clamped else
+                            f"covers session losses ${self.cumulative_loss:.2f} "
+                            f"+ 1R profit locked ≈${locked_profit:.2f}"
                         )
                         self._log(
                             f"🛡️  [{self.name[:20]}] BUY risk-free (R2) | "
                             f"profit={profit_dist:.5f} ≥ {trigger_r}R={trigger_r*r:.5f} | "
-                            f"SL moved to {new_sl:.5f} ({coverage_note})", "NEW"
+                            f"SL → {new_sl:.5f} ({coverage})", "NEW"
                         )
 
         if sell_pos and not self.risk_free_applied.get("sell", False):
@@ -464,32 +578,30 @@ class _ProtectionMixin:
                             self.override_r2_price["sell"], self.symbol)
                     else:
                         lock_dist = self._risk_free_lock_distance(
-                            r, lot_for_lock, multiplier=2.0)
+                            lot_for_lock, r)
                         new_sl = _round_price(
                             pos.price_open - lock_dist, self.symbol)
                         new_sl, clamped = self._clamp_sl_to_valid_range(
                             new_sl, pos, is_buy=False)
                         if clamped:
                             self._log(
-                                f"⚠️  [{self.name[:20]}] SELL risk-free lock distance "
-                                f"clamped to {new_sl:.5f} — the full cumulative-loss-"
-                                f"covering amount would have put SL on the wrong side "
-                                f"of current price/TP (this is the fix for an earlier "
-                                f"'Invalid stops' loop on small remaining lots after a "
-                                f"partial exit); locking the best achievable amount "
-                                f"instead of nothing", "WARN"
+                                f"⚠️  [{self.name[:20]}] SELL risk-free SL clamped "
+                                f"to {new_sl:.5f} — R2 distance overshoots current "
+                                f"price; locking best achievable amount", "WARN"
                             )
                     if self._move_position_sl(pos.ticket, new_sl):
                         self.risk_free_applied["sell"] = True
-                        coverage_note = (
-                            "partial — see clamp warning above, still ≥ breakeven"
-                            if clamped else
-                            f"2× cumulative_loss=${self.cumulative_loss:.2f} + this round's risk"
+                        locked_profit = lock_dist / self.pip_size * \
+                            self._dollar_per_pip(lot_for_lock)
+                        coverage = (
+                            "partial (clamped)" if clamped else
+                            f"covers session losses ${self.cumulative_loss:.2f} "
+                            f"+ 1R profit locked ≈${locked_profit:.2f}"
                         )
                         self._log(
                             f"🛡️  [{self.name[:20]}] SELL risk-free (R2) | "
                             f"profit={profit_dist:.5f} ≥ {trigger_r}R={trigger_r*r:.5f} | "
-                            f"SL moved to {new_sl:.5f} ({coverage_note})", "NEW"
+                            f"SL → {new_sl:.5f} ({coverage})", "NEW"
                         )
 
         # ── Trader-adjusted override, post-application ─────────────
@@ -510,21 +622,13 @@ class _ProtectionMixin:
     def revert_loss_free(self):
         """
         Called when the trader DISABLES Loss-Free (R1) while it's
-        already locked in on one or both sides. By request: turning
-        the feature off should undo whatever lock IT applied, not
-        leave the SL parked at the locked level forever — restore the
-        normal rectangle-pinned SL (_buy_sl_price/_sell_sl_price) and
-        let _resync_open_sl resume normal operation on that side.
+        already locked in on one or both sides. Restore the normal
+        rectangle-pinned SL (_buy_sl_price/_sell_sl_price) and let
+        _resync_open_sl resume normal operation on that side.
 
-        LAYERING (R1 and R2 must each work independently and never
-        interfere with the other): if R2 (risk-free) has ALSO applied
-        on a side — meaning it already superseded R1's lock with its
-        own, larger one — disabling R1 must NOT blow that away. Only
-        clear R1's own bookkeeping in that case and leave the SL
-        exactly where R2 put it.
-
-        Can't undo a partial close if R1 itself never does one (only
-        R2/risk-free does) — only the SL itself is reverted here.
+        LAYERING: if R2 (risk-free) has ALSO applied on a side,
+        disabling R1 must NOT blow that away. Only clear R1's own
+        bookkeeping in that case and leave the SL where R2 put it.
         """
         try:
             buy_pos = [p for p in (mt5.positions_get(symbol=self.symbol) or [])
@@ -550,11 +654,6 @@ class _ProtectionMixin:
                     self._log(f"⚠️  [{self.name[:20]}] Loss-Free disabled — BUY flag cleared but no "
                               f"open position found for ticket {self.buy_pos_ticket} (already closed?)", "WARN")
         except Exception as e:
-            # MUST surface this — a GUI checkbox handler's exception
-            # can otherwise be silently swallowed by Qt's event loop,
-            # which would look EXACTLY like "disabling does nothing"
-            # with zero log output to explain why (this is the bug
-            # this except-block exists to rule out, not theorize about).
             self._log(f"💥  [{self.name[:20]}] Loss-Free revert (BUY) crashed: "
                       f"{type(e).__name__}: {e}", "ERROR")
 
@@ -584,14 +683,8 @@ class _ProtectionMixin:
 
         LAYERING: if R1 (loss-free) is STILL enabled and was also
         applied on this side before R2 superseded it, disabling R2
-        must fall back to R1's lock — NOT jump straight past it to
-        the raw rectangle edge, which would be a worse outcome than
-        the trader's still-active R1 setting promises. Only goes all
-        the way back to the rectangle edge if R1 isn't in play either.
-
-        Note: if a partial exit already executed, that volume is gone
-        for good (a real executed deal can't be un-closed) — only the
-        SL on whatever volume remains gets reverted.
+        falls back to R1's lock (loss-free distance, not 2×) — NOT
+        back to the raw rectangle edge.
         """
         try:
             buy_pos = [p for p in (mt5.positions_get(symbol=self.symbol) or [])
@@ -608,14 +701,15 @@ class _ProtectionMixin:
                 if buy_pos:
                     pos = buy_pos[0]
                     if self._loss_free_enabled and self.loss_free_applied.get("buy", False):
-                        r = self.buy_r_frozen
-                        lock_dist = self._risk_free_lock_distance(
-                            r, pos.volume, multiplier=1.0)
+                        # Fall back to R1 (loss-free) level = entry + session-loss coverage
+                        lock_dist = self._loss_free_lock_distance(pos.volume)
                         fallback_sl, _c = self._clamp_sl_to_valid_range(
-                            _round_price(pos.price_open + lock_dist, self.symbol), pos, is_buy=True)
+                            _round_price(pos.price_open +
+                                         lock_dist, self.symbol),
+                            pos, is_buy=True)
                         self._move_position_sl(pos.ticket, fallback_sl)
                         self._log(f"🛡️  [{self.name[:20]}] Risk-Free disabled — BUY SL fell back "
-                                  f"to Loss-Free's lock at {fallback_sl:.5f} (still enabled)")
+                                  f"to Loss-Free level at {fallback_sl:.5f} (entry breakeven)")
                     else:
                         self._move_position_sl(pos.ticket, self._buy_sl_price)
                         self._log(
@@ -624,9 +718,6 @@ class _ProtectionMixin:
                     self._log(f"⚠️  [{self.name[:20]}] Risk-Free disabled — BUY flag cleared but no "
                               f"open position found for ticket {self.buy_pos_ticket} (already closed?)", "WARN")
         except Exception as e:
-            # MUST surface this — see the matching comment in
-            # revert_loss_free for why a bare except here would be
-            # exactly as bad as the silent-failure bug this is fixing.
             self._log(f"💥  [{self.name[:20]}] Risk-Free revert (BUY) crashed: "
                       f"{type(e).__name__}: {e}", "ERROR")
 
@@ -637,14 +728,14 @@ class _ProtectionMixin:
                 if sell_pos:
                     pos = sell_pos[0]
                     if self._loss_free_enabled and self.loss_free_applied.get("sell", False):
-                        r = self.sell_r_frozen
-                        lock_dist = self._risk_free_lock_distance(
-                            r, pos.volume, multiplier=1.0)
+                        lock_dist = self._loss_free_lock_distance(pos.volume)
                         fallback_sl, _c = self._clamp_sl_to_valid_range(
-                            _round_price(pos.price_open - lock_dist, self.symbol), pos, is_buy=False)
+                            _round_price(pos.price_open -
+                                         lock_dist, self.symbol),
+                            pos, is_buy=False)
                         self._move_position_sl(pos.ticket, fallback_sl)
                         self._log(f"🛡️  [{self.name[:20]}] Risk-Free disabled — SELL SL fell back "
-                                  f"to Loss-Free's lock at {fallback_sl:.5f} (still enabled)")
+                                  f"to Loss-Free level at {fallback_sl:.5f} (entry breakeven)")
                     else:
                         self._move_position_sl(pos.ticket, self._sell_sl_price)
                         self._log(

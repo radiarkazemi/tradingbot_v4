@@ -39,11 +39,11 @@ MAGIC_NUMBER = 998877
 # kill switch instead of placing another order — see MAX_TOUCHES.
 SOFT_LOT_MODE = 1   # 1, 2, or 3 — selectable in the GUI
 
-SOFT_LOT_TABLE_MODE1 = [0.01, 0.01, 0.02, 0.03, 0.04, 0.05,
-                        0.06, 0.07, 0.08, 0.09, 0.10, 0.11]
+SOFT_LOT_TABLE_MODE1 = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06,
+                        0.07, 0.08, 0.09, 0.10, 0.11, 0.12]
 
-SOFT_LOT_TABLE_MODE2 = [0.01, 0.01, 0.02, 0.04, 0.06, 0.08,
-                        0.10, 0.12, 0.14, 0.16, 0.18, 0.20]
+SOFT_LOT_TABLE_MODE2 = [0.01, 0.02, 0.04, 0.06, 0.08, 0.10,
+                        0.12, 0.14, 0.16, 0.18, 0.20, 0.22]
 
 # Mode 3 = Classic Martingale — the original doubling formula this
 # project ran before the soft-lot tables existed. NOT table-driven:

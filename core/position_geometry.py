@@ -237,11 +237,15 @@ class _GeometryMixin:
 
     @property
     def _buy_tp_price(self):
+        if getattr(self, 'tp_free', False):
+            return 0.0  # TP-Free mode: no take-profit on any order
         tp_dist = self._tp_pips * self.pip_size
         return _round_price(self._buy_entry + tp_dist, self.symbol)
 
     @property
     def _sell_tp_price(self):
+        if getattr(self, 'tp_free', False):
+            return 0.0  # TP-Free mode: no take-profit on any order
         tp_dist = self._tp_pips * self.pip_size
         return _round_price(self._sell_entry - tp_dist, self.symbol)
 

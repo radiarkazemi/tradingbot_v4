@@ -51,7 +51,8 @@ class _HelpersMixin:
                 "type_filling": _filling_mode(self.symbol),
             })
             if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                self._log(f"✅  [{self.name[:20]}] closed #{ticket} (gap correction)", "NEW")
+                self._log(
+                    f"✅  [{self.name[:20]}] closed #{ticket} (gap correction)", "NEW")
                 return True
             self._log(
                 f"⚠️  [{self.name[:20]}] failed to close #{ticket} for gap correction: "
@@ -131,15 +132,15 @@ class _HelpersMixin:
 
         cancel_order(ticket)
 
-        is_buy     = target.type == mt5.ORDER_TYPE_BUY_STOP
+        is_buy = target.type == mt5.ORDER_TYPE_BUY_STOP
         order_type = mt5.ORDER_TYPE_BUY_STOP if is_buy else mt5.ORDER_TYPE_SELL_STOP
-        filling    = _filling_mode(self.symbol)
-        use_sl     = exact_sl if exact_sl is not None else target.sl
-        entry      = target.price_open
+        filling = _filling_mode(self.symbol)
+        use_sl = exact_sl if exact_sl is not None else target.sl
+        entry = target.price_open
 
-        tick         = mt5.symbol_info_tick(self.symbol)
-        bid          = tick.bid if tick else 0.0
-        ask          = tick.ask if tick else 0.0
+        tick = mt5.symbol_info_tick(self.symbol)
+        bid = tick.bid if tick else 0.0
+        ask = tick.ask if tick else 0.0
         already_past = (is_buy and ask > 0 and entry <= ask) or \
                        (not is_buy and bid > 0 and entry >= bid)
 
@@ -239,7 +240,7 @@ class _HelpersMixin:
             return price, reason
         except Exception as e:
             log.warning("Could not fetch close info for #%s: %s",
-                       position_ticket, e)
+                        position_ticket, e)
             return None, None
 
     def _get_close_price(self, position_ticket: int):
@@ -287,8 +288,8 @@ class _HelpersMixin:
             )
             if not probe_margin or probe_margin <= 0:
                 return 0.0
-            free_margin   = acct.margin_free
-            equity        = acct.equity
+            free_margin = acct.margin_free
+            equity = acct.equity
             safety_margin = equity * 0.05
             usable_margin = free_margin - safety_margin
             if usable_margin <= 0:
@@ -304,14 +305,14 @@ class _HelpersMixin:
     def _can_afford(self, lot: float, is_buy: bool) -> bool:
         try:
             action = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
-            tick   = mt5.symbol_info_tick(self.symbol)
-            price  = tick.ask if is_buy else tick.bid
+            tick = mt5.symbol_info_tick(self.symbol)
+            price = tick.ask if is_buy else tick.bid
             margin = mt5.order_calc_margin(action, self.symbol, lot, price)
-            acct   = mt5.account_info()
+            acct = mt5.account_info()
             if margin is None or acct is None:
                 return True
-            free_margin   = acct.margin_free
-            equity        = acct.equity
+            free_margin = acct.margin_free
+            equity = acct.equity
             # 5% cushion — enough to avoid landing right at a literal
             # margin call after this fill, without blocking trades the
             # account can genuinely afford. The previous 20% buffer
@@ -332,3 +333,67 @@ class _HelpersMixin:
         except Exception as e:
             log.warning("Margin check error: %s", e)
             return True
+
+    def _try_restore_session_counters(self) -> bool:
+        """
+        Load touch_count, round, buy_lot, sell_lot, and cumulative_loss
+        from the session file IF it matches this rectangle's edges.
+
+        Called from place_initial_pair on a round==0 fresh start so
+        that restarting the bot mid-cycle continues from the correct
+        lot rather than resetting to base_lot.
+
+        Returns True if counters were restored, False if no matching
+        session file exists (caller should use fresh defaults).
+
+        This is intentionally narrow — it ONLY restores counters, never
+        live MT5 positions or order tickets. Full position/order resume
+        still goes through scan_and_resume (resume_enabled flow). The
+        two mechanisms are complementary: scan_and_resume handles the
+        case where MT5 positions are still open; this handles the case
+        where positions already closed but the rectangle is being
+        re-touched on the next fresh entry after a bot restart.
+        """
+        try:
+            from core.resume import session_file
+            import json
+            import os
+            sf = session_file(self.symbol)
+            if not os.path.exists(sf):
+                return False
+            with open(sf) as f:
+                data = json.load(f)
+
+            # Only restore if the session file is for THIS rectangle
+            # (same edges within 1 pip tolerance — guards against
+            # accidentally picking up a session from a different rect).
+            tol = self.pip_size * 2
+            saved_top = data.get("rect_top", 0)
+            saved_bottom = data.get("rect_bottom", 0)
+            if (abs(saved_top - self.rect_top) > tol
+                    or abs(saved_bottom - self.rect_bottom) > tol):
+                return False  # different rectangle — don't restore
+
+            # Only restore if the session had actual progress
+            saved_round = int(data.get("round", 0))
+            saved_touch = int(data.get("touch_count", 0))
+            if saved_round <= 1 and saved_touch == 0:
+                return False  # nothing meaningful to restore
+
+            self.round = saved_round
+            self.touch_count = saved_touch
+            self.buy_lot = float(data.get("buy_lot", self.base_lot))
+            self.sell_lot = float(data.get("sell_lot", self.base_lot))
+            self.cumulative_loss = float(data.get("cumulative_loss", 0.0))
+            self._log(
+                f"📂  [{self.name[:20]}] session restored after restart — "
+                f"R{self.round} touch={self.touch_count} "
+                f"lot={self.buy_lot:.2f}/{self.sell_lot:.2f} "
+                f"cumulative_loss=${self.cumulative_loss:.2f} "
+                f"(continuing mid-cycle, not restarting from lot 1)",
+                "NEW"
+            )
+            return True
+        except Exception as e:
+            log.warning("Session counter restore error: %s", e)
+            return False
