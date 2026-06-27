@@ -227,4 +227,12 @@ venv/
 
 backtest_results/
 
-installer_output/
+
+# ── TraderBot v4 sensitive files — NEVER commit these ──
+inject_secret.py        # contains your secret key
+issued_keys.json        # list of all license keys you've issued
+dist/                   # compiled EXE output
+build/                  # PyInstaller temp files
+installer_output/       # compiled installer
+__pycache__/
+*.pyc

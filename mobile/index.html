@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0D1117">
+<title>TraderBot v4</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  :root{
+    --bg:#0D1117;--panel:#161B22;--card:#1C2333;--input:#141D2E;
+    --border:#2A3550;--txt:#E8EDF5;--txt2:#8B9BB4;--txt3:#4A5568;
+    --gold:#F5A623;--green:#00D97E;--green-dk:#003D22;
+    --red:#FF4560;--cyan:#00BCD4;--orange:#FF8C00;
+  }
+  body{background:var(--bg);color:var(--txt);font-family:'Segoe UI',system-ui,sans-serif;
+       font-size:14px;min-height:100vh;overflow-x:hidden}
+
+  /* ── Login screen ── */
+  #login{display:flex;flex-direction:column;align-items:center;justify-content:center;
+         min-height:100vh;padding:24px;gap:16px}
+  #login h1{color:var(--gold);font-size:28px;font-weight:700}
+  #login p{color:var(--txt2);font-size:13px;text-align:center}
+  #login input{width:100%;max-width:360px;background:var(--input);color:var(--txt);
+               border:1px solid var(--border);border-radius:8px;padding:14px 16px;
+               font-size:15px;outline:none;font-family:monospace}
+  #login input:focus{border-color:var(--cyan)}
+  #login button{width:100%;max-width:360px;background:var(--green-dk);color:var(--green);
+                border:1px solid var(--green);border-radius:8px;padding:14px;
+                font-size:15px;font-weight:700;cursor:pointer}
+  #login .err{color:var(--red);font-size:12px}
+
+  /* ── App shell ── */
+  #app{display:none;flex-direction:column;min-height:100vh}
+  
+  /* Header */
+  .hdr{background:var(--panel);border-bottom:1px solid var(--border);
+       padding:12px 16px;display:flex;align-items:center;gap:10px;
+       position:sticky;top:0;z-index:10}
+  .hdr-logo{font-size:22px}
+  .hdr-title{flex:1}
+  .hdr-title h2{color:var(--gold);font-size:15px;font-weight:700}
+  .hdr-title p{color:var(--txt3);font-size:11px}
+  .status-dot{width:10px;height:10px;border-radius:50%;background:var(--txt3);flex-shrink:0}
+  .status-dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+
+  /* Tabs */
+  .tabs{display:flex;background:var(--panel);border-bottom:1px solid var(--border);
+        position:sticky;top:57px;z-index:9}
+  .tab{flex:1;padding:10px 4px;text-align:center;font-size:11px;color:var(--txt3);
+       cursor:pointer;border-bottom:2px solid transparent;transition:.2s}
+  .tab.active{color:var(--gold);border-color:var(--gold)}
+
+  /* Content */
+  .page{display:none;padding:12px;flex-direction:column;gap:10px}
+  .page.active{display:flex}
+
+  /* Cards */
+  .card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px}
+  .card h3{color:var(--txt2);font-size:11px;font-weight:700;letter-spacing:.5px;
+           text-transform:uppercase;margin-bottom:10px}
+
+  /* Stat grid */
+  .stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .stat{background:var(--input);border-radius:6px;padding:10px 12px}
+  .stat-label{color:var(--txt3);font-size:10px;margin-bottom:4px}
+  .stat-value{font-size:20px;font-weight:700;color:var(--txt)}
+  .stat-value.green{color:var(--green)}
+  .stat-value.red{color:var(--red)}
+  .stat-value.gold{color:var(--gold)}
+  .stat-value.cyan{color:var(--cyan)}
+
+  /* Big start/stop button */
+  .btn-start{width:100%;padding:16px;border-radius:10px;font-size:16px;font-weight:700;
+             cursor:pointer;border:2px solid var(--green);
+             background:var(--green-dk);color:var(--green);transition:.2s}
+  .btn-start.running{background:#2a0a0a;color:var(--red);border-color:var(--red)}
+  .btn-start:active{opacity:.8}
+
+  /* Settings rows */
+  .setting-row{display:flex;align-items:center;justify-content:space-between;
+               padding:10px 0;border-bottom:1px solid var(--border)}
+  .setting-row:last-child{border-bottom:none}
+  .setting-label{color:var(--txt2);font-size:13px}
+  .setting-val{color:var(--txt);font-size:13px;font-weight:600}
+  select,input[type=number]{background:var(--input);color:var(--txt);
+    border:1px solid var(--border);border-radius:6px;padding:6px 10px;
+    font-size:13px;outline:none;max-width:130px}
+  select:focus,input[type=number]:focus{border-color:var(--cyan)}
+
+  /* Toggle */
+  .toggle{position:relative;width:44px;height:24px;flex-shrink:0}
+  .toggle input{opacity:0;width:0;height:0}
+  .slider{position:absolute;inset:0;background:var(--border);border-radius:24px;
+          cursor:pointer;transition:.3s}
+  .slider:before{content:"";position:absolute;height:18px;width:18px;left:3px;bottom:3px;
+                 background:var(--txt2);border-radius:50%;transition:.3s}
+  input:checked+.slider{background:var(--green)}
+  input:checked+.slider:before{transform:translateX(20px);background:#fff}
+
+  /* Positions list */
+  .position{background:var(--input);border-radius:6px;padding:10px 12px;
+            border-left:3px solid var(--border)}
+  .position.buy{border-color:var(--green)}
+  .position.sell{border-color:var(--red)}
+  .pos-header{display:flex;justify-content:space-between;margin-bottom:6px}
+  .pos-side{font-weight:700;font-size:13px}
+  .pos-side.buy{color:var(--green)}
+  .pos-side.sell{color:var(--red)}
+  .pos-pnl{font-weight:700;font-size:14px}
+  .pos-details{display:flex;gap:12px;flex-wrap:wrap}
+  .pos-detail{color:var(--txt3);font-size:11px}
+  .pos-detail span{color:var(--txt2)}
+
+  /* Log */
+  .log-container{background:var(--input);border-radius:6px;padding:10px;
+                 height:calc(100vh - 200px);overflow-y:auto;font-family:monospace;font-size:11px}
+  .log-line{padding:2px 0;border-bottom:1px solid #ffffff08}
+  .log-line.NEW{color:var(--green)}
+  .log-line.ERROR{color:var(--red)}
+  .log-line.WARN{color:var(--orange)}
+  .log-line .ts{color:var(--txt3);margin-right:6px}
+
+  /* Bias */
+  .bias-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .bias-card{background:var(--input);border-radius:6px;padding:10px;text-align:center}
+  .bias-tf{color:var(--gold);font-size:11px;font-weight:700;margin-bottom:4px}
+  .bias-dir{font-size:16px;font-weight:700;margin-bottom:2px}
+  .bias-pct{font-size:12px;color:var(--txt2)}
+  .bias-bull{color:var(--green)}
+  .bias-bear{color:var(--red)}
+  .bias-neut{color:var(--txt3)}
+  .bias-dominant{background:var(--card);border-radius:8px;padding:12px;
+                 text-align:center;margin-bottom:10px;font-size:14px;font-weight:700}
+
+  /* Refresh bar */
+  .refresh-bar{display:flex;align-items:center;justify-content:space-between;
+               color:var(--txt3);font-size:11px;padding:4px 0}
+  .refresh-btn{background:var(--card);border:1px solid var(--border);border-radius:4px;
+               padding:4px 10px;color:var(--txt2);font-size:11px;cursor:pointer}
+
+  /* Loading spinner */
+  .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);
+           border-top-color:var(--cyan);border-radius:50%;animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* Toast */
+  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
+         background:var(--card);border:1px solid var(--border);border-radius:8px;
+         padding:10px 20px;font-size:13px;z-index:100;opacity:0;transition:.3s;
+         pointer-events:none;white-space:nowrap}
+  #toast.show{opacity:1}
+
+  /* Report */
+  .report-stat{display:flex;justify-content:space-between;padding:8px 0;
+               border-bottom:1px solid var(--border)}
+  .report-stat:last-child{border:none}
+  .r-label{color:var(--txt2);font-size:13px}
+  .r-value{font-weight:700;font-size:13px}
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login">
+  <div style="font-size:48px">📈</div>
+  <h1>TraderBot v4</h1>
+  <p>Enter your API key to connect</p>
+  <input id="key-input" type="password" placeholder="Paste API key here" autocomplete="off">
+  <button onclick="doLogin()">Connect</button>
+  <p class="err" id="login-err"></p>
+  <p style="color:var(--txt3);font-size:11px;margin-top:8px">
+    Find your API key in:<br>%APPDATA%\TraderBotV4\api_key.txt
+  </p>
+</div>
+
+<!-- App -->
+<div id="app">
+  <!-- Header -->
+  <div class="hdr">
+    <div class="hdr-logo">📈</div>
+    <div class="hdr-title">
+      <h2>TraderBot v4</h2>
+      <p id="hdr-subtitle">Connecting...</p>
+    </div>
+    <div class="status-dot" id="status-dot"></div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('dashboard')">🏠 Home</div>
+    <div class="tab" onclick="switchTab('positions')">📊 Positions</div>
+    <div class="tab" onclick="switchTab('settings')">⚙️ Settings</div>
+    <div class="tab" onclick="switchTab('bias')">🧭 Bias</div>
+    <div class="tab" onclick="switchTab('log')">📋 Log</div>
+  </div>
+
+  <!-- Dashboard -->
+  <div class="page active" id="page-dashboard">
+    <div class="refresh-bar">
+      <span id="last-update">—</span>
+      <button class="refresh-btn" onclick="refresh()">↻ Refresh</button>
+    </div>
+
+    <!-- Start/Stop -->
+    <button class="btn-start" id="btn-startstop" onclick="toggleBot()">
+      ▶  Start Bot
+    </button>
+
+    <!-- Stats -->
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="stat-label">Balance</div>
+        <div class="stat-value gold" id="s-balance">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Equity</div>
+        <div class="stat-value cyan" id="s-equity">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">P&L Today</div>
+        <div class="stat-value" id="s-pnl">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Uptime</div>
+        <div class="stat-value" id="s-uptime" style="font-size:16px">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Symbol</div>
+        <div class="stat-value cyan" id="s-symbol" style="font-size:16px">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Open Positions</div>
+        <div class="stat-value gold" id="s-positions">—</div>
+      </div>
+    </div>
+
+    <!-- Progress to target -->
+    <div class="card">
+      <h3>Balance Target</h3>
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:12px">
+        <span style="color:var(--txt2)">Start: <span id="t-start" style="color:var(--txt)">—</span></span>
+        <span style="color:var(--txt2)">Target: <span id="t-target" style="color:var(--green)">—</span></span>
+      </div>
+      <div style="background:var(--input);border-radius:4px;height:8px;overflow:hidden">
+        <div id="progress-bar" style="height:100%;background:var(--green);border-radius:4px;
+             transition:.5s;width:0%"></div>
+      </div>
+      <div style="color:var(--txt3);font-size:11px;margin-top:6px;text-align:right" id="t-pct">0%</div>
+    </div>
+  </div>
+
+  <!-- Positions -->
+  <div class="page" id="page-positions">
+    <div class="refresh-bar">
+      <span>Open Positions</span>
+      <button class="refresh-btn" onclick="refresh()">↻ Refresh</button>
+    </div>
+    <div id="positions-list">
+      <div style="color:var(--txt3);text-align:center;padding:24px;font-size:13px">
+        No open positions
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div class="page" id="page-settings">
+    <div class="card">
+      <h3>Trading Settings</h3>
+      <div class="setting-row">
+        <span class="setting-label">Symbol</span>
+        <input type="text" id="set-symbol" style="max-width:130px;text-align:right">
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Base Lot</span>
+        <input type="number" id="set-lot" step="0.01" min="0.01" style="max-width:90px;text-align:right">
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Lot Mode</span>
+        <select id="set-mode">
+          <option value="1">Mode 1 (+0.01/touch)</option>
+          <option value="2">Mode 2 (+0.02/touch)</option>
+          <option value="3">Mode 3 (Martingale)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Protection</h3>
+      <div class="setting-row">
+        <span class="setting-label">🟩 Loss-Free (R1)</span>
+        <label class="toggle">
+          <input type="checkbox" id="set-lossfree">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">🛡 Risk-Free (R2)</span>
+        <label class="toggle">
+          <input type="checkbox" id="set-riskfree">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">🚫 TP-Free mode</span>
+        <label class="toggle">
+          <input type="checkbox" id="set-tpfree">
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <button onclick="saveSettings()" style="
+      width:100%;padding:14px;border-radius:8px;background:var(--green-dk);
+      color:var(--green);border:1px solid var(--green);font-size:14px;
+      font-weight:700;cursor:pointer">
+      Save Settings
+    </button>
+    <p style="color:var(--txt3);font-size:11px;text-align:center">
+      Stop the bot before changing settings
+    </p>
+  </div>
+
+  <!-- Bias -->
+  <div class="page" id="page-bias">
+    <div class="refresh-bar">
+      <span>ICT Multi-TF Bias</span>
+      <button class="refresh-btn" onclick="loadBias()">↻ Refresh</button>
+    </div>
+    <div id="bias-dominant" class="bias-dominant" style="color:var(--txt3)">
+      Enable Bias Watcher in the desktop app
+    </div>
+    <div id="bias-grid" class="bias-grid"></div>
+  </div>
+
+  <!-- Log -->
+  <div class="page" id="page-log">
+    <div class="refresh-bar">
+      <span>Bot Log</span>
+      <button class="refresh-btn" onclick="loadLog()">↻ Refresh</button>
+    </div>
+    <div class="log-container" id="log-container">
+      <div style="color:var(--txt3);font-size:12px">No log lines yet</div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ── Config ────────────────────────────────────────────────────────
+const BASE = window.location.origin;
+let API_KEY = localStorage.getItem("tb4_key") || "";
+let autoRefreshTimer = null;
+let currentTab = "dashboard";
+
+// ── Auth ──────────────────────────────────────────────────────────
+async function doLogin() {
+  const key = document.getElementById("key-input").value.trim();
+  if (!key) return;
+  try {
+    const r = await fetch(`${BASE}/api/auth`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({key})
+    });
+    if (r.ok) {
+      API_KEY = key;
+      localStorage.setItem("tb4_key", key);
+      showApp();
+    } else {
+      document.getElementById("login-err").textContent = "Invalid key. Check api_key.txt on your PC.";
+    }
+  } catch(e) {
+    document.getElementById("login-err").textContent = "Cannot connect. Check PC IP and server is running.";
+  }
+}
+
+function showApp() {
+  document.getElementById("login").style.display = "none";
+  document.getElementById("app").style.display = "flex";
+  document.getElementById("app").style.flexDirection = "column";
+  refresh();
+  startAutoRefresh();
+}
+
+function startAutoRefresh() {
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+  autoRefreshTimer = setInterval(() => {
+    if (currentTab === "dashboard" || currentTab === "positions") refresh();
+    else if (currentTab === "log") loadLog();
+    else if (currentTab === "bias") loadBias();
+  }, 5000);
+}
+
+// ── API calls ─────────────────────────────────────────────────────
+async function api(path, method="GET", body=null) {
+  const opts = {
+    method,
+    headers: {"X-API-Key": API_KEY, "Content-Type": "application/json"}
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(`${BASE}${path}`, opts);
+  if (r.status === 401) { logout(); return null; }
+  return r.json();
+}
+
+function logout() {
+  localStorage.removeItem("tb4_key");
+  location.reload();
+}
+
+// ── Refresh ───────────────────────────────────────────────────────
+async function refresh() {
+  const data = await api("/api/status");
+  if (!data) return;
+  
+  document.getElementById("last-update").textContent =
+    "Updated: " + new Date().toLocaleTimeString();
+
+  // Status dot + subtitle
+  const dot = document.getElementById("status-dot");
+  const sub = document.getElementById("hdr-subtitle");
+  if (data.running) {
+    dot.className = "status-dot on";
+    sub.textContent = `Running • ${data.symbol}`;
+  } else {
+    dot.className = "status-dot";
+    sub.textContent = "Bot stopped";
+  }
+
+  // Start/stop button
+  const btn = document.getElementById("btn-startstop");
+  if (data.running) {
+    btn.textContent = "■  Stop Bot";
+    btn.className = "btn-start running";
+  } else {
+    btn.textContent = "▶  Start Bot";
+    btn.className = "btn-start";
+  }
+
+  // Stats
+  document.getElementById("s-balance").textContent = "$" + data.balance.toFixed(2);
+  document.getElementById("s-equity").textContent  = "$" + data.equity.toFixed(2);
+  
+  const pnl = data.pnl_today;
+  const pnlEl = document.getElementById("s-pnl");
+  pnlEl.textContent = (pnl >= 0 ? "+" : "") + "$" + pnl.toFixed(2);
+  pnlEl.className = "stat-value " + (pnl > 0 ? "green" : pnl < 0 ? "red" : "");
+
+  document.getElementById("s-uptime").textContent   = data.uptime || "—";
+  document.getElementById("s-symbol").textContent   = data.symbol || "—";
+  document.getElementById("s-positions").textContent = data.positions.length;
+
+  // Progress bar
+  const start  = data.start_balance;
+  const target = data.target_balance;
+  const bal    = data.balance;
+  document.getElementById("t-start").textContent  = "$" + start.toFixed(2);
+  document.getElementById("t-target").textContent = "$" + target.toFixed(2);
+  if (target > start) {
+    const pct = Math.min(100, Math.max(0, (bal - start) / (target - start) * 100));
+    document.getElementById("progress-bar").style.width = pct.toFixed(1) + "%";
+    document.getElementById("t-pct").textContent = pct.toFixed(1) + "%";
+  }
+
+  // Positions tab
+  updatePositions(data.positions);
+
+  // Sync settings
+  document.getElementById("set-symbol").value   = data.symbol;
+  document.getElementById("set-lot").value       = data.lot_size;
+  document.getElementById("set-mode").value      = data.lot_mode;
+  document.getElementById("set-lossfree").checked = data.loss_free;
+  document.getElementById("set-riskfree").checked = data.risk_free;
+  document.getElementById("set-tpfree").checked   = data.tp_free;
+}
+
+function updatePositions(positions) {
+  const el = document.getElementById("positions-list");
+  if (!positions || positions.length === 0) {
+    el.innerHTML = '<div style="color:var(--txt3);text-align:center;padding:24px;font-size:13px">No open positions</div>';
+    return;
+  }
+  el.innerHTML = positions.map(p => {
+    const side = p.side.toLowerCase();
+    const pnlCls = p.pnl >= 0 ? "green" : "red";
+    const sign = p.pnl >= 0 ? "+" : "";
+    return `
+    <div class="position ${side}" style="margin-bottom:8px">
+      <div class="pos-header">
+        <span class="pos-side ${side}">${p.side} #${p.ticket}</span>
+        <span class="pos-pnl" style="color:var(--${pnlCls})">${sign}$${p.pnl.toFixed(2)}</span>
+      </div>
+      <div class="pos-details">
+        <div class="pos-detail">Lot: <span>${p.lot}</span></div>
+        <div class="pos-detail">Entry: <span>${p.entry.toFixed(4)}</span></div>
+        <div class="pos-detail">Now: <span>${p.current.toFixed(4)}</span></div>
+        <div class="pos-detail">SL: <span>${p.sl.toFixed(4)}</span></div>
+        ${p.tp ? `<div class="pos-detail">TP: <span>${p.tp.toFixed(4)}</span></div>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+}
+
+// ── Bot control ───────────────────────────────────────────────────
+async function toggleBot() {
+  const btn = document.getElementById("btn-startstop");
+  const running = btn.classList.contains("running");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+
+  if (running) {
+    const r = await api("/api/stop", "POST");
+    toast(r ? r.msg : "Stopped");
+  } else {
+    const r = await api("/api/start", "POST", {
+      symbol:    document.getElementById("set-symbol").value,
+      lot_size:  parseFloat(document.getElementById("set-lot").value),
+      lot_mode:  parseInt(document.getElementById("set-mode").value),
+      risk_free: document.getElementById("set-riskfree").checked,
+      loss_free: document.getElementById("set-lossfree").checked,
+      tp_free:   document.getElementById("set-tpfree").checked,
+    });
+    toast(r ? r.msg : "Started");
+  }
+  btn.disabled = false;
+  setTimeout(refresh, 800);
+}
+
+// ── Settings ──────────────────────────────────────────────────────
+async function saveSettings() {
+  const r = await api("/api/settings", "POST", {
+    symbol:    document.getElementById("set-symbol").value,
+    lot_size:  parseFloat(document.getElementById("set-lot").value),
+    lot_mode:  parseInt(document.getElementById("set-mode").value),
+    risk_free: document.getElementById("set-riskfree").checked,
+    loss_free: document.getElementById("set-lossfree").checked,
+    tp_free:   document.getElementById("set-tpfree").checked,
+  });
+  toast(r ? (r.ok ? "Settings saved" : r.msg) : "Error");
+}
+
+// ── Bias ──────────────────────────────────────────────────────────
+async function loadBias() {
+  const data = await api("/api/bias");
+  if (!data || !data.available) {
+    document.getElementById("bias-dominant").innerHTML =
+      '<span style="color:var(--txt3)">Enable Bias Watcher in the desktop app</span>';
+    document.getElementById("bias-grid").innerHTML = "";
+    return;
+  }
+
+  const tfs = ["M1","M5","M15","M30","H1"];
+  let bulls = 0, bears = 0, neuts = 0;
+  let html = "";
+
+  tfs.forEach(tf => {
+    const b = data.data[tf];
+    if (!b) return;
+    if (b.direction === "BULL") bulls++;
+    else if (b.direction === "BEAR") bears++;
+    else neuts++;
+
+    const cls = b.direction === "BULL" ? "bias-bull" : b.direction === "BEAR" ? "bias-bear" : "bias-neut";
+    const em  = b.direction === "BULL" ? "🟢" : b.direction === "BEAR" ? "🔴" : "⚪";
+    const pct = b.direction === "BULL" ? b.bull_pct : b.direction === "BEAR" ? b.bear_pct : 50;
+    html += `
+    <div class="bias-card">
+      <div class="bias-tf">${tf}</div>
+      <div class="bias-dir ${cls}">${em} ${b.direction}</div>
+      <div class="bias-pct">${pct.toFixed(0)}% · ${b.confidence}</div>
+    </div>`;
+  });
+
+  let dom = bulls > bears && bulls > neuts ? `🟢 BULLISH (${bulls}/5)`
+          : bears > bulls && bears > neuts ? `🔴 BEARISH (${bears}/5)`
+          : `⚪ MIXED (${bulls}🟢 ${bears}🔴 ${neuts}⚪)`;
+  const domCls = bulls > bears && bulls > neuts ? "var(--green)"
+               : bears > bulls ? "var(--red)" : "var(--txt2)";
+
+  document.getElementById("bias-dominant").innerHTML =
+    `<span style="color:${domCls}">${dom}</span>`;
+  document.getElementById("bias-grid").innerHTML = html;
+}
+
+// ── Log ───────────────────────────────────────────────────────────
+async function loadLog() {
+  const data = await api("/api/log?n=80");
+  if (!data) return;
+  const el = document.getElementById("log-container");
+  if (!data.lines.length) {
+    el.innerHTML = '<div style="color:var(--txt3);font-size:12px">No log lines yet</div>';
+    return;
+  }
+  el.innerHTML = data.lines.map(l =>
+    `<div class="log-line ${l.l}"><span class="ts">${l.t}</span>${escHtml(l.m)}</div>`
+  ).join("");
+  el.scrollTop = el.scrollHeight;
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────
+function switchTab(name) {
+  currentTab = name;
+  document.querySelectorAll(".tab").forEach((t,i) => {
+    const names = ["dashboard","positions","settings","bias","log"];
+    t.className = "tab" + (names[i] === name ? " active" : "");
+  });
+  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+  document.getElementById("page-" + name).classList.add("active");
+
+  if (name === "bias")  loadBias();
+  if (name === "log")   loadLog();
+  if (name === "dashboard" || name === "positions") refresh();
+}
+
+// ── Toast ─────────────────────────────────────────────────────────
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = "show";
+  setTimeout(() => t.className = "", 2500);
+}
+
+// ── Init ──────────────────────────────────────────────────────────
+document.getElementById("key-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") doLogin();
+});
+
+if (API_KEY) {
+  // Try auto-login with saved key
+  fetch(`${BASE}/api/auth`, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({key: API_KEY})
+  }).then(r => {
+    if (r.ok) showApp();
+    else { API_KEY = ""; localStorage.removeItem("tb4_key"); }
+  }).catch(() => {});
+}
+</script>
+</body>
+</html>
