@@ -18,7 +18,6 @@ from .theme import C, SS
 from .widgets import Sig, Sparkline, _stat_card, _vline, _hline
 from .shared_imports import *
 
-
 class ControlPanelMixin:
     def _build_ui(self):
         root = QWidget()
@@ -220,8 +219,7 @@ class ControlPanelMixin:
             "Positions run until manually closed or SL is hit.\n"
             "Balance TP (R3) still works as an account-level circuit breaker.\n"
             "Use this when you want to exit manually at your chosen level.")
-        self.chk_tp_free.setStyleSheet(
-            f"color:{C['orange']};font-weight:bold;")
+        self.chk_tp_free.setStyleSheet(f"color:{C['orange']};font-weight:bold;")
         cl.addWidget(self.chk_tp_free)
 
         cl.addWidget(_hline())
@@ -272,6 +270,24 @@ class ControlPanelMixin:
             f"color:{C['cyan']};font-weight:bold;")
         self.chk_risk_free.toggled.connect(self._on_risk_free_toggled)
         cl.addWidget(self.chk_risk_free)
+
+        self.chk_entry_filter = QCheckBox(
+            "🟡  OB+FVG Entry Filter")
+        self.chk_entry_filter.setChecked(False)
+        self.chk_entry_filter.setToolTip(
+            "Only enter a trade if there is an Order Block + Fair Value Gap\n"
+            "confluence zone overlapping the touched rectangle edge.\n\n"
+            "Direction must match:\n"
+            "  Bottom touch → needs a BULLISH OB+FVG confluence nearby\n"
+            "  Top touch    → needs a BEARISH OB+FVG confluence nearby\n\n"
+            "If no qualifying confluence is found, the touch is skipped\n"
+            "and the bot keeps waiting for the next one.\n\n"
+            "Overlap tolerance: config.ENTRY_FILTER_OVERLAP_PIPS (default 15p)\n"
+            "Min score: config.ENTRY_FILTER_MIN_SCORE (default 10)")
+        self.chk_entry_filter.setStyleSheet(
+            f"color:{C['gold']};font-weight:bold;")
+        self.chk_entry_filter.toggled.connect(self._on_entry_filter_toggled)
+        cl.addWidget(self.chk_entry_filter)
 
         cl.addWidget(_hline())
 

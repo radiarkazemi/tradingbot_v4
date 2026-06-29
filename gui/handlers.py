@@ -16,7 +16,6 @@ from .theme import C, SS
 from .widgets import Sig, Sparkline, _stat_card, _vline, _hline
 from .shared_imports import *
 
-
 class HandlersMixin:
     def _start(self):
         sym = self.sym_combo.currentText().strip() or WATCH_SYMBOL
@@ -42,6 +41,7 @@ class HandlersMixin:
             loss_free_enabled=self.chk_loss_free.isChecked(),
             soft_lot_mode=soft_lot_mode,
             tp_free=self.chk_tp_free.isChecked(),
+            entry_filter_ob_fvg=self.chk_entry_filter.isChecked(),
         )
         self._worker.sig.on_log(lambda m, l: self._sig.log_line.emit(m, l))
         self._worker.sig.on_status(lambda s:    self._sig.status.emit(s))
@@ -678,8 +678,7 @@ class HandlersMixin:
         max1 = t1[-1]
         max2 = t2[-1]
         step1 = round(t1[2] - t1[1], 2) if len(t1) > 2 else round(base_lot, 2)
-        step2 = round(
-            t2[3] - t2[2], 2) if len(t2) > 3 else round(base_lot * 2, 2)
+        step2 = round(t2[3] - t2[2], 2) if len(t2) > 3 else round(base_lot * 2, 2)
 
         prev_idx = self.lot_mode_combo.currentIndex()
         self.lot_mode_combo.blockSignals(True)
@@ -719,6 +718,21 @@ class HandlersMixin:
                     f"{datetime.now().strftime('%H:%M:%S')}  "
                     f"🧭  ICT Bias Watcher DISABLED", "INFO"
                 )
+
+    def _on_entry_filter_toggled(self, checked: bool):
+        """Toggle OB+FVG entry filter live on the running watcher."""
+        import config as _cfg
+        _cfg.ENTRY_FILTER_OB_FVG = checked
+        if self._worker:
+            self._worker._entry_filter_ob_fvg = checked
+            for src in self._worker._sources.values():
+                src._entry_filter_ob_fvg = checked
+        msg = (
+            "🟡  OB+FVG Entry Filter ENABLED — only entering on OB+FVG confluence"
+            if checked else
+            "⬜  OB+FVG Entry Filter DISABLED — entering on any touch"
+        )
+        self._sig.log_line.emit(msg, "NEW" if checked else "INFO")
 
     def _on_risk_free_toggled(self, checked: bool):
         """

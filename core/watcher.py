@@ -236,7 +236,8 @@ class WatcherThread(threading.Thread):
     def __init__(self, symbol: str, lot_size: float,
                  follow_enabled: bool = True, resume_enabled: bool = False,
                  risk_free_enabled: bool = False, loss_free_enabled: bool = False,
-                 soft_lot_mode: int = 1, tp_free: bool = False):
+                 soft_lot_mode: int = 1, tp_free: bool = False,
+                 entry_filter_ob_fvg: bool = False):
         super().__init__(daemon=True)
         self.symbol = symbol
         self.lot_size = lot_size
@@ -247,6 +248,7 @@ class WatcherThread(threading.Thread):
         self._soft_lot_mode = soft_lot_mode if soft_lot_mode in (
             1, 2, 3) else 1
         self._tp_free = tp_free
+        self._entry_filter_ob_fvg = entry_filter_ob_fvg
         self.sig = WatcherSignals()
         self._stop_event = threading.Event()
         self._sources: dict[str, SourceState] = {}
@@ -571,6 +573,7 @@ class WatcherThread(threading.Thread):
                         loss_free_enabled=self._loss_free_enabled,
                         soft_lot_mode=self._soft_lot_mode,
                         tp_free=self._tp_free,
+                        entry_filter_ob_fvg=self._entry_filter_ob_fvg,
                     )
                     state.registered_at = cur_t
                     state.last_prev_t = prev_t

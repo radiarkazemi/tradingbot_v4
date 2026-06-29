@@ -341,46 +341,62 @@ class _ProtectionMixin:
         covers any cumulative session losses → net session result = $0.
 
         Formula:
-            distance = cumulative_loss / dollar_per_pip   (in price)
+            distance = max(min_pip, cumulative_loss / dollar_per_pip)
 
-        If cumulative_loss is 0 (first round, no prior losses):
-            distance = 0  →  SL lands exactly at entry (breakeven on
-            this trade, $0 locked above session baseline).
+        Minimum of 1 pip is enforced so the broker never normalises the
+        SL to a price below or equal to the entry price (which would put
+        the stop in loss territory or cause a rejection).
 
-        This is intentionally minimal — R1 just guarantees we can't
-        lose MORE than we've already lost in this session.
-        R2 adds a profit buffer on top of this.
+        If cumulative_loss = 0: distance = 1 pip (bare breakeven buffer).
         """
+        # Minimum: always place SL at least 1 pip above entry
+        min_dist = self.pip_size
+
         dpp = self._dollar_per_pip(lot)
         if dpp <= 0:
-            return 0.0
-        # Cover session losses (0 if none yet = entry breakeven)
-        loss_pips = max(0.0, self.cumulative_loss) / dpp
-        return loss_pips * self.pip_size
+            # dpp unavailable — use calibrated value scaled to this lot
+            # if that's also missing, use minimum distance only
+            if getattr(self, "_pip_value_per_base_lot", 0.0) > 0 and lot > 0:
+                base = getattr(self, "base_lot", 0.01) or 0.01
+                dpp = self._pip_value_per_base_lot * (lot / base)
+            if dpp <= 0:
+                return min_dist
 
-    def _risk_free_lock_distance(self, lot: float, r_frozen: float) -> float:
+        loss_pips = max(0.0, self.cumulative_loss) / dpp
+        return max(min_dist, loss_pips * self.pip_size)
+
+    def _risk_free_lock_distance(self, lot: float, tp_dist: float) -> float:
         """
         Price distance (≥0) beyond entry for the Risk-Free (R2) SL.
 
-        Goal: lock a MEANINGFUL profit buffer regardless of session
-        history. Always at least 1R above entry, plus enough to cover
-        session losses.
+        Design (3-step geometry):
+          The entry→TP range is divided into 3 equal steps.
+          R2 TRIGGERS when price reaches 2/3 of the entry→TP range.
+          R2 LOCKS SL at the 2/3 mark — guaranteeing 2/3 of TP as profit.
 
-        Formula:
-            distance = max(1R, loss_free_distance + 1R)
-            where 1R = r_frozen (the rectangle height, which is the
-            distance from entry to SL — the natural risk unit).
+          If session has losses, SL is raised further so that if hit,
+          the profit covers cumulative_loss × 2 (recovery buffer).
+          Always the MAX of (2/3 TP distance, loss×2 coverage).
 
-        Examples:
-            First round (cumulative_loss=0): distance = 1R
-                → SL at entry + 1R = guaranteed profit of 1R
-            After $10 loss, 1R=$5: loss_free = 2 pips, 1R = 26 pips
-                → distance = 28 pips → SL covers $10 loss + 1R profit
+        Args:
+            lot:     active position lot (for dollar_per_pip calculation)
+            tp_dist: entry→TP distance in price units
+
+        Returns:
+            Price distance from entry to lock the SL at.
         """
-        loss_free = self._loss_free_lock_distance(lot)
-        # 1R in price units
-        r_in_price = r_frozen  # r_frozen is already in price (abs SL distance)
-        return loss_free + r_in_price
+        # 2/3 of the entry→TP range
+        two_thirds = tp_dist * (2.0 / 3.0)
+
+        # Session loss recovery: cover cumulative_loss × 2
+        loss_coverage = 0.0
+        if self.cumulative_loss > 0:
+            dpp = self._dollar_per_pip(lot)
+            if dpp > 0:
+                loss_pips    = (self.cumulative_loss * 2.0) / dpp
+                loss_coverage = loss_pips * self.pip_size
+
+        return max(two_thirds, loss_coverage)
 
     def _check_loss_free(self, buy_pos: list, sell_pos: list):
         """
@@ -452,8 +468,12 @@ class _ProtectionMixin:
                             self.override_r1_price["sell"], self.symbol)
                     else:
                         lock_dist = self._loss_free_lock_distance(pos.volume)
+                        # SELL profits when price goes DOWN.
+                        # Protective SL must go ABOVE entry (into profit zone).
+                        # lock_dist > 0 means we need price to stay below
+                        # entry+lock_dist to lock the recovery amount.
                         new_sl = _round_price(
-                            pos.price_open - lock_dist, self.symbol)
+                            pos.price_open + lock_dist, self.symbol)
                         new_sl, clamped = self._clamp_sl_to_valid_range(
                             new_sl, pos, is_buy=False)
                         if clamped:
@@ -517,82 +537,76 @@ class _ProtectionMixin:
 
         if buy_pos and not self.risk_free_applied.get("buy", False):
             pos = sorted(buy_pos, key=lambda p: p.time, reverse=True)[0]
-            r = self.buy_r_frozen
-            if r > 0:
-                profit_dist = pos.price_current - pos.price_open
-                if profit_dist >= trigger_r * r:
+            # Use TP-based geometry: trigger at 2/3 of entry→TP range
+            tp_dist = (pos.tp - pos.price_open) if pos.tp and pos.tp > pos.price_open else 0.0
+            if tp_dist > 0:
+                profit_dist  = pos.price_current - pos.price_open
+                trigger_dist = tp_dist * (2.0 / 3.0)
+                if profit_dist >= trigger_dist:
                     lot_for_lock = pos.volume
-                    if getattr(cfg, "PARTIAL_EXIT_ENABLED", False):
-                        remain = self._partial_close_position(
-                            pos.ticket, getattr(cfg, "PARTIAL_EXIT_RATIO", 0.70))
-                        if remain is not None:
-                            lot_for_lock = remain
-                    clamped = False
+                    clamped  = False
+                    lock_dist = 0.0
                     if self.override_r2_price.get("buy") is not None:
-                        new_sl = _round_price(
-                            self.override_r2_price["buy"], self.symbol)
+                        new_sl    = _round_price(self.override_r2_price["buy"], self.symbol)
+                        lock_dist = new_sl - pos.price_open
                     else:
-                        # R2: lock session losses + 1R profit buffer
-                        lock_dist = self._risk_free_lock_distance(
-                            lot_for_lock, r)
-                        new_sl = _round_price(
-                            pos.price_open + lock_dist, self.symbol)
-                        new_sl, clamped = self._clamp_sl_to_valid_range(
-                            new_sl, pos, is_buy=True)
-                        if clamped:
-                            self._log(
-                                f"⚠️  [{self.name[:20]}] BUY risk-free SL clamped "
-                                f"to {new_sl:.5f} — R2 distance overshoots current "
-                                f"price; locking best achievable amount", "WARN"
-                            )
+                        lock_dist = self._risk_free_lock_distance(lot_for_lock, tp_dist)
+                        new_sl    = _round_price(pos.price_open + lock_dist, self.symbol)
+                    new_sl, clamped = self._clamp_sl_to_valid_range(
+                        new_sl, pos, is_buy=True)
+                    if clamped:
+                        self._log(
+                            f"⚠️  [{self.name[:20]}] BUY risk-free SL clamped "
+                            f"to {new_sl:.5f} — 2/3 TP level unreachable; "
+                            f"locking best achievable", "WARN"
+                        )
                     if self._move_position_sl(pos.ticket, new_sl):
                         self.risk_free_applied["buy"] = True
-                        locked_profit = lock_dist / self.pip_size * \
-                            self._dollar_per_pip(lot_for_lock)
-                        coverage = (
-                            "partial (clamped)" if clamped else
-                            f"covers session losses ${self.cumulative_loss:.2f} "
-                            f"+ 1R profit locked ≈${locked_profit:.2f}"
+                        locked_pips = lock_dist / self.pip_size
+                        locked_usd  = locked_pips * self._dollar_per_pip(lot_for_lock)
+                        pct         = profit_dist / tp_dist * 100
+                        loss_note   = (
+                            f" | covers loss×2=${self.cumulative_loss*2:.2f}"
+                            if self.cumulative_loss > 0 else ""
                         )
                         self._log(
                             f"🛡️  [{self.name[:20]}] BUY risk-free (R2) | "
-                            f"profit={profit_dist:.5f} ≥ {trigger_r}R={trigger_r*r:.5f} | "
-                            f"SL → {new_sl:.5f} ({coverage})", "NEW"
+                            f"price at {pct:.0f}% of TP range ≥ 67% trigger | "
+                            f"SL → {new_sl:.5f} "
+                            f"(locks ≈${locked_usd:.2f} / {locked_pips:.1f}pips{loss_note})",
+                            "NEW"
                         )
 
         if sell_pos and not self.risk_free_applied.get("sell", False):
             pos = sorted(sell_pos, key=lambda p: p.time, reverse=True)[0]
-            r = self.sell_r_frozen
-            if r > 0:
-                profit_dist = pos.price_open - pos.price_current
-                if profit_dist >= trigger_r * r:
+            # SELL profits when price goes DOWN.
+            # tp_dist = distance from entry DOWN to TP
+            tp_dist = (pos.price_open - pos.tp) if pos.tp and pos.tp < pos.price_open else 0.0
+            if tp_dist > 0:
+                profit_dist  = pos.price_open - pos.price_current
+                trigger_dist = tp_dist * (2.0 / 3.0)
+                if profit_dist >= trigger_dist:
                     lot_for_lock = pos.volume
-                    if getattr(cfg, "PARTIAL_EXIT_ENABLED", False):
-                        remain = self._partial_close_position(
-                            pos.ticket, getattr(cfg, "PARTIAL_EXIT_RATIO", 0.70))
-                        if remain is not None:
-                            lot_for_lock = remain
-                    clamped = False
+                    clamped  = False
+                    lock_dist = 0.0
                     if self.override_r2_price.get("sell") is not None:
-                        new_sl = _round_price(
-                            self.override_r2_price["sell"], self.symbol)
+                        new_sl    = _round_price(self.override_r2_price["sell"], self.symbol)
+                        lock_dist = pos.price_open - new_sl
                     else:
-                        lock_dist = self._risk_free_lock_distance(
-                            lot_for_lock, r)
-                        new_sl = _round_price(
-                            pos.price_open - lock_dist, self.symbol)
-                        new_sl, clamped = self._clamp_sl_to_valid_range(
-                            new_sl, pos, is_buy=False)
-                        if clamped:
-                            self._log(
-                                f"⚠️  [{self.name[:20]}] SELL risk-free SL clamped "
-                                f"to {new_sl:.5f} — R2 distance overshoots current "
-                                f"price; locking best achievable amount", "WARN"
-                            )
+                        lock_dist = self._risk_free_lock_distance(lot_for_lock, tp_dist)
+                        # SELL: SL goes ABOVE entry to lock profit
+                        new_sl    = _round_price(pos.price_open + lock_dist, self.symbol)
+                    new_sl, clamped = self._clamp_sl_to_valid_range(
+                        new_sl, pos, is_buy=False)
+                    if clamped:
+                        self._log(
+                            f"⚠️  [{self.name[:20]}] SELL risk-free SL clamped "
+                            f"to {new_sl:.5f} — 2/3 TP level unreachable; "
+                            f"locking best achievable", "WARN"
+                        )
                     if self._move_position_sl(pos.ticket, new_sl):
                         self.risk_free_applied["sell"] = True
-                        locked_profit = lock_dist / self.pip_size * \
-                            self._dollar_per_pip(lot_for_lock)
+                        locked_profit = lock_dist / self.pip_size * self._dollar_per_pip(lot_for_lock)
                         coverage = (
                             "partial (clamped)" if clamped else
                             f"covers session losses ${self.cumulative_loss:.2f} "
@@ -704,8 +718,7 @@ class _ProtectionMixin:
                         # Fall back to R1 (loss-free) level = entry + session-loss coverage
                         lock_dist = self._loss_free_lock_distance(pos.volume)
                         fallback_sl, _c = self._clamp_sl_to_valid_range(
-                            _round_price(pos.price_open +
-                                         lock_dist, self.symbol),
+                            _round_price(pos.price_open + lock_dist, self.symbol),
                             pos, is_buy=True)
                         self._move_position_sl(pos.ticket, fallback_sl)
                         self._log(f"🛡️  [{self.name[:20]}] Risk-Free disabled — BUY SL fell back "
@@ -730,8 +743,7 @@ class _ProtectionMixin:
                     if self._loss_free_enabled and self.loss_free_applied.get("sell", False):
                         lock_dist = self._loss_free_lock_distance(pos.volume)
                         fallback_sl, _c = self._clamp_sl_to_valid_range(
-                            _round_price(pos.price_open -
-                                         lock_dist, self.symbol),
+                            _round_price(pos.price_open - lock_dist, self.symbol),
                             pos, is_buy=False)
                         self._move_position_sl(pos.ticket, fallback_sl)
                         self._log(f"🛡️  [{self.name[:20]}] Risk-Free disabled — SELL SL fell back "

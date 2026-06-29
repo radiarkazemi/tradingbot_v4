@@ -100,10 +100,6 @@ class _RecoveryMixin:
             self.sell_lot = self.buy_lot
 
         if not self._can_afford(self.buy_lot, is_buy=True):
-            # Table lot isn't affordable — try the largest lot that
-            # IS affordable instead of abandoning the cycle. The
-            # TP/SL formulas read self.buy_lot live, so reducing it
-            # here still produces a correctly-sized TP.
             reduced_lot = self._max_affordable_lot()
             if reduced_lot >= 0.01:
                 self._log(
@@ -111,7 +107,11 @@ class _RecoveryMixin:
                     f"{self.buy_lot:.2f} → {reduced_lot:.2f} (margin-limited) — "
                     f"keeping the cycle alive toward the original target", "WARN"
                 )
-                self.buy_lot = reduced_lot
+                self.buy_lot  = reduced_lot
+                # CRITICAL: keep sell_lot in sync so session restore
+                # doesn't place mismatched lots after a restart
+                if self.soft_lot_mode != 3:
+                    self.sell_lot = reduced_lot
             else:
                 # Even the minimum lot isn't affordable — nothing left
                 # to try. Reset cleanly rather than leaving the source
@@ -212,6 +212,10 @@ class _RecoveryMixin:
                     f"keeping the cycle alive toward the original target", "WARN"
                 )
                 self.sell_lot = reduced_lot
+                # CRITICAL: keep buy_lot in sync so session restore
+                # doesn't place mismatched lots after a restart
+                if self.soft_lot_mode != 3:
+                    self.buy_lot = reduced_lot
             else:
                 self._log(
                     f"🛡️  [{self.name[:20]}] R{self.round} MARGIN PROTECTION | "

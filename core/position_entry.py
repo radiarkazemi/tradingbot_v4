@@ -81,6 +81,28 @@ class _EntryMixin:
                 f"🎯  [{self.name[:20]}] touched ({desc}) | "
                 f"rect=[{self.rect_bottom:.5f}-{self.rect_top:.5f}] | placing orders", "NEW"
             )
+
+            # ── OB+FVG entry filter ──────────────────────────────
+            if getattr(self, "_entry_filter_ob_fvg", False):
+                import config as _cfg
+                # Determine which edge was touched and expected direction
+                touched_bottom = "bottom" in desc
+                direction = "BULL" if touched_bottom else "BEAR"
+                edge_price = self.rect_bottom if touched_bottom else self.rect_top
+                from core.entry_filter import check_ob_fvg_confluence_at_edge
+                allowed, zone, filter_msg = check_ob_fvg_confluence_at_edge(
+                    symbol       = self.symbol,
+                    pip_size     = self.pip_size,
+                    edge_price   = edge_price,
+                    direction    = direction,
+                    overlap_pips = getattr(_cfg, "ENTRY_FILTER_OVERLAP_PIPS", 15.0),
+                    min_score    = getattr(_cfg, "ENTRY_FILTER_MIN_SCORE", 10.0),
+                )
+                self._log(filter_msg, "NEW" if allowed else "WARN")
+                if not allowed:
+                    # Reset to IDLE — wait for the next touch
+                    return False
+
             self.place_initial_pair()
             return True
 

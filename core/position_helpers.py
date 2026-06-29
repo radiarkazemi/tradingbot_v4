@@ -51,8 +51,7 @@ class _HelpersMixin:
                 "type_filling": _filling_mode(self.symbol),
             })
             if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                self._log(
-                    f"✅  [{self.name[:20]}] closed #{ticket} (gap correction)", "NEW")
+                self._log(f"✅  [{self.name[:20]}] closed #{ticket} (gap correction)", "NEW")
                 return True
             self._log(
                 f"⚠️  [{self.name[:20]}] failed to close #{ticket} for gap correction: "
@@ -64,12 +63,28 @@ class _HelpersMixin:
             return False
 
     def _move_position_sl(self, ticket: int, new_sl: float) -> bool:
-        """Modify an open position's SL via TRADE_ACTION_SLTP."""
+        """
+        Modify an open position's SL via TRADE_ACTION_SLTP.
+
+        Handles MT5 retcode 10025 ("No changes") gracefully:
+        MT5 sometimes applies the SL change but returns 10025 instead
+        of 10009 (DONE) when it normalises the price to the same value
+        it already has, or due to a broker-side quirk. In that case we
+        re-read the position and treat it as success if pos.sl already
+        matches new_sl within 1 point.
+        """
         try:
             pos = next((p for p in (mt5.positions_get(symbol=self.symbol) or [])
                        if p.ticket == ticket), None)
             if not pos:
                 return False
+
+            # Skip if SL is already at the target (within 1 point)
+            digits = getattr(mt5.symbol_info(self.symbol), "digits", 5)
+            tolerance = 10 ** -digits
+            if abs(pos.sl - new_sl) < tolerance:
+                return True  # already at target — treat as success silently
+
             res = mt5.order_send({
                 "action":   mt5.TRADE_ACTION_SLTP,
                 "symbol":   self.symbol,
@@ -80,13 +95,28 @@ class _HelpersMixin:
             })
             if res and res.retcode == mt5.TRADE_RETCODE_DONE:
                 return True
+
+            # retcode 10025 = "No changes" — MT5 may have applied it anyway.
+            # Re-read the position and verify.
+            NO_CHANGES = 10025
+            if res and res.retcode == NO_CHANGES:
+                import time as _t
+                _t.sleep(0.1)
+                pos2 = next((p for p in (mt5.positions_get(symbol=self.symbol) or [])
+                             if p.ticket == ticket), None)
+                if pos2 and abs(pos2.sl - new_sl) < tolerance:
+                    return True  # MT5 applied it silently
+                # Genuinely no change — SL didn't move
+                return False
+
             self._log(
-                f"⚠️  [{self.name[:20]}] risk-free SL move failed for #{ticket}: "
-                f"{getattr(res, 'comment', 'unknown error')}", "WARN"
+                f"⚠️  [{self.name[:20]}] SL move failed for #{ticket}: "
+                f"{getattr(res, 'comment', res.retcode if res else 'no response')}",
+                "WARN"
             )
             return False
         except Exception as e:
-            log.warning("Risk-free SL move error: %s", e)
+            log.warning("SL move error: %s", e)
             return False
 
     def _move_position_tp(self, ticket: int, new_tp: float) -> bool:
@@ -132,15 +162,15 @@ class _HelpersMixin:
 
         cancel_order(ticket)
 
-        is_buy = target.type == mt5.ORDER_TYPE_BUY_STOP
+        is_buy     = target.type == mt5.ORDER_TYPE_BUY_STOP
         order_type = mt5.ORDER_TYPE_BUY_STOP if is_buy else mt5.ORDER_TYPE_SELL_STOP
-        filling = _filling_mode(self.symbol)
-        use_sl = exact_sl if exact_sl is not None else target.sl
-        entry = target.price_open
+        filling    = _filling_mode(self.symbol)
+        use_sl     = exact_sl if exact_sl is not None else target.sl
+        entry      = target.price_open
 
-        tick = mt5.symbol_info_tick(self.symbol)
-        bid = tick.bid if tick else 0.0
-        ask = tick.ask if tick else 0.0
+        tick         = mt5.symbol_info_tick(self.symbol)
+        bid          = tick.bid if tick else 0.0
+        ask          = tick.ask if tick else 0.0
         already_past = (is_buy and ask > 0 and entry <= ask) or \
                        (not is_buy and bid > 0 and entry >= bid)
 
@@ -240,7 +270,7 @@ class _HelpersMixin:
             return price, reason
         except Exception as e:
             log.warning("Could not fetch close info for #%s: %s",
-                        position_ticket, e)
+                       position_ticket, e)
             return None, None
 
     def _get_close_price(self, position_ticket: int):
@@ -288,8 +318,8 @@ class _HelpersMixin:
             )
             if not probe_margin or probe_margin <= 0:
                 return 0.0
-            free_margin = acct.margin_free
-            equity = acct.equity
+            free_margin   = acct.margin_free
+            equity        = acct.equity
             safety_margin = equity * 0.05
             usable_margin = free_margin - safety_margin
             if usable_margin <= 0:
@@ -305,14 +335,14 @@ class _HelpersMixin:
     def _can_afford(self, lot: float, is_buy: bool) -> bool:
         try:
             action = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
-            tick = mt5.symbol_info_tick(self.symbol)
-            price = tick.ask if is_buy else tick.bid
+            tick   = mt5.symbol_info_tick(self.symbol)
+            price  = tick.ask if is_buy else tick.bid
             margin = mt5.order_calc_margin(action, self.symbol, lot, price)
-            acct = mt5.account_info()
+            acct   = mt5.account_info()
             if margin is None or acct is None:
                 return True
-            free_margin = acct.margin_free
-            equity = acct.equity
+            free_margin   = acct.margin_free
+            equity        = acct.equity
             # 5% cushion — enough to avoid landing right at a literal
             # margin call after this fill, without blocking trades the
             # account can genuinely afford. The previous 20% buffer
@@ -333,7 +363,6 @@ class _HelpersMixin:
         except Exception as e:
             log.warning("Margin check error: %s", e)
             return True
-
     def _try_restore_session_counters(self) -> bool:
         """
         Load touch_count, round, buy_lot, sell_lot, and cumulative_loss
@@ -356,8 +385,7 @@ class _HelpersMixin:
         """
         try:
             from core.resume import session_file
-            import json
-            import os
+            import json, os
             sf = session_file(self.symbol)
             if not os.path.exists(sf):
                 return False
@@ -368,7 +396,7 @@ class _HelpersMixin:
             # (same edges within 1 pip tolerance — guards against
             # accidentally picking up a session from a different rect).
             tol = self.pip_size * 2
-            saved_top = data.get("rect_top", 0)
+            saved_top    = data.get("rect_top", 0)
             saved_bottom = data.get("rect_bottom", 0)
             if (abs(saved_top - self.rect_top) > tol
                     or abs(saved_bottom - self.rect_bottom) > tol):
@@ -380,10 +408,10 @@ class _HelpersMixin:
             if saved_round <= 1 and saved_touch == 0:
                 return False  # nothing meaningful to restore
 
-            self.round = saved_round
-            self.touch_count = saved_touch
-            self.buy_lot = float(data.get("buy_lot", self.base_lot))
-            self.sell_lot = float(data.get("sell_lot", self.base_lot))
+            self.round         = saved_round
+            self.touch_count   = saved_touch
+            self.buy_lot       = float(data.get("buy_lot", self.base_lot))
+            self.sell_lot      = float(data.get("sell_lot", self.base_lot))
             self.cumulative_loss = float(data.get("cumulative_loss", 0.0))
             self._log(
                 f"📂  [{self.name[:20]}] session restored after restart — "
