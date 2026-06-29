@@ -18,7 +18,39 @@ from .theme import C, SS
 from .widgets import Sig, Sparkline, _stat_card, _vline, _hline
 from .shared_imports import *
 
+
 class ControlPanelMixin:
+
+    def _toggle_btn(self, label, tooltip, color_on, handler):
+        btn = QPushButton(label)
+        btn.setCheckable(True)
+        btn.setChecked(False)
+        btn.setMinimumHeight(28)
+        btn.setToolTip(tooltip)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background:#1A2030; color:#4A5568;
+                border:1px solid #2A3550; border-radius:5px;
+                font-weight:bold; font-size:11px;
+                text-align:left; padding:0 0 0 8px;
+            }}
+            QPushButton:checked {{
+                background:rgba(0,160,220,0.12);
+                color:{color_on}; border:1px solid {color_on};
+            }}
+            QPushButton:hover:!checked {{ border-color:#3A4560; color:#8B9BB4; }}
+            QPushButton:hover:checked  {{ background:rgba(0,160,220,0.18); }}
+        """)
+        btn.toggled.connect(handler)
+        return btn
+
+    def _btn_row(self, a, b, layout):
+        r = QHBoxLayout()
+        r.setSpacing(5)
+        r.addWidget(a)
+        r.addWidget(b)
+        layout.addLayout(r)
+
     def _build_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
@@ -212,81 +244,60 @@ class ControlPanelMixin:
         _row("💰 Balance TP (R3):", self.spin_balance_tp, cl,
              "Account-wide stop level (close all & stop here).")
 
-        self.chk_tp_free = QCheckBox("🚫  TP-Free mode (no take-profit)")
-        self.chk_tp_free.setChecked(False)
-        self.chk_tp_free.setToolTip(
-            "When enabled, all orders are placed WITHOUT a take-profit.\n"
-            "Positions run until manually closed or SL is hit.\n"
-            "Balance TP (R3) still works as an account-level circuit breaker.\n"
-            "Use this when you want to exit manually at your chosen level.")
-        self.chk_tp_free.setStyleSheet(f"color:{C['orange']};font-weight:bold;")
-        cl.addWidget(self.chk_tp_free)
-
         cl.addWidget(_hline())
         cl.addWidget(self._section_label("BEHAVIOR"))
 
-        self.chk_follow = QCheckBox("Follow moved/resized rectangles")
+        self.chk_tp_free = self._toggle_btn(
+            "🚫  TP-Free",
+            "Place all orders WITHOUT a take-profit.\n"
+            "Positions run until manually closed or SL hit.",
+            C["orange"], lambda c: None)
+        self.chk_follow = self._toggle_btn(
+            "📐  Follow Rect",
+            "When you drag/resize a rectangle while idle,\n"
+            "the bot resets and re-watches from the new edges.",
+            C["cyan"], lambda c: None)
         self.chk_follow.setChecked(True)
-        self.chk_follow.setToolTip(
-            "When you drag or resize a rectangle on the chart while it's "
-            "still idle, the bot resets and re-watches from the new edges")
-        cl.addWidget(self.chk_follow)
+        self._btn_row(self.chk_tp_free, self.chk_follow, cl)
 
-        self.chk_resume = QCheckBox("Resume previous session")
-        self.chk_resume.setChecked(False)
-        self.chk_resume.setToolTip(
-            "On start, scan MT5 for existing bot positions/orders\n"
-            "and resume monitoring them without re-entering.\n"
-            "Use this if the bot stopped unexpectedly.")
-        self.chk_resume.setStyleSheet(f"color:{C['orange']};")
+        self.chk_resume = self._toggle_btn(
+            "🔁  Resume Session",
+            "On start, scan MT5 for existing bot positions\n"
+            "and resume monitoring them without re-entering.",
+            C["orange"], lambda c: None)
         cl.addWidget(self.chk_resume)
 
         cl.addWidget(_hline())
         cl.addWidget(self._section_label("PROTECTIONS"))
 
-        self.chk_loss_free = QCheckBox("🟩  Enable Loss-Free (R1)")
-        self.chk_loss_free.setChecked(False)
-        self.chk_loss_free.setToolTip(
-            "When a position's floating profit reaches 1× its risk,\n"
-            "move its SL to breakeven — this round can no longer lose.\n"
-            "On close the bot resets and waits for a fresh entry.")
-        self.chk_loss_free.setStyleSheet(
-            f"color:{C['green']};font-weight:bold;")
-        self.chk_loss_free.toggled.connect(self._on_loss_free_toggled)
-        cl.addWidget(self.chk_loss_free)
+        self.chk_loss_free = self._toggle_btn(
+            "🟩  Loss-Free (R1)",
+            "When profit ≥ 1R: move SL to breakeven.\n"
+            "This round can no longer lose.",
+            C["green"], self._on_loss_free_toggled)
+        self.chk_risk_free = self._toggle_btn(
+            "🛡  Risk-Free (R2)",
+            "When price at 2/3 of entry→TP:\n"
+            "  Lock SL at 2/3 mark (2/3 of TP as profit).\n"
+            "  With losses: SL covers losses×2.",
+            C["cyan"], self._on_risk_free_toggled)
+        self._btn_row(self.chk_loss_free, self.chk_risk_free, cl)
 
-        self.chk_risk_free = QCheckBox(
-            "🛡  Enable Risk-Free (R2) + Partial Exit")
-        self.chk_risk_free.setChecked(False)
-        self.chk_risk_free.setToolTip(
-            "When a position's floating profit reaches 2× its risk:\n"
-            "  1. Close 70% of its volume now (banks real profit)\n"
-            "  2. Move SL on the remaining 30% to lock in\n"
-            "     cumulative-loss-covering profit — that slice keeps\n"
-            "     running toward TP (R3) with its SL already locked.\n"
-            "On final close the bot resets and waits for a fresh entry.\n"
-            "Partial-exit ratio is config.PARTIAL_EXIT_RATIO (default 70%).")
-        self.chk_risk_free.setStyleSheet(
-            f"color:{C['cyan']};font-weight:bold;")
-        self.chk_risk_free.toggled.connect(self._on_risk_free_toggled)
-        cl.addWidget(self.chk_risk_free)
+        self.chk_trailing = self._toggle_btn(
+            "📈  Trailing SL",
+            "After R2 locks the SL, trail price by\n"
+            "config.TRAILING_STEP_PIPS — max profit without full TP.",
+            C["cyan"], self._on_trailing_toggled)
+        self.chk_partial_exit = self._toggle_btn(
+            "📤  Partial Exit (R3)",
+            "At TP: close 70%, keep 30% running.",
+            C["gold"], self._on_partial_exit_toggled)
+        self._btn_row(self.chk_trailing, self.chk_partial_exit, cl)
 
-        self.chk_entry_filter = QCheckBox(
-            "🟡  OB+FVG Entry Filter")
-        self.chk_entry_filter.setChecked(False)
-        self.chk_entry_filter.setToolTip(
-            "Only enter a trade if there is an Order Block + Fair Value Gap\n"
-            "confluence zone overlapping the touched rectangle edge.\n\n"
-            "Direction must match:\n"
-            "  Bottom touch → needs a BULLISH OB+FVG confluence nearby\n"
-            "  Top touch    → needs a BEARISH OB+FVG confluence nearby\n\n"
-            "If no qualifying confluence is found, the touch is skipped\n"
-            "and the bot keeps waiting for the next one.\n\n"
-            "Overlap tolerance: config.ENTRY_FILTER_OVERLAP_PIPS (default 15p)\n"
-            "Min score: config.ENTRY_FILTER_MIN_SCORE (default 10)")
-        self.chk_entry_filter.setStyleSheet(
-            f"color:{C['gold']};font-weight:bold;")
-        self.chk_entry_filter.toggled.connect(self._on_entry_filter_toggled)
+        self.chk_entry_filter = self._toggle_btn(
+            "🟡  OB+FVG Filter",
+            "Only enter if OB+FVG confluence overlaps touched edge.",
+            C["gold"], self._on_entry_filter_toggled)
         cl.addWidget(self.chk_entry_filter)
 
         cl.addWidget(_hline())

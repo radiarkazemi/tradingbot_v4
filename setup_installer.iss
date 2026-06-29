@@ -53,7 +53,7 @@ Name: "startmenuicon";  Description: "Create Start Menu shortcut"; \
 
 [Files]
 ; All compiled bot files from PyInstaller output
-Source: "dist\TraderBotV4\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\TraderBotV4\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "session_*.json,profile.json,*.log"
 
 [Icons]
 Name: "{group}\{#AppName}";          Filename: "{app}\{#AppExeName}"

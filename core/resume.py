@@ -25,7 +25,24 @@ log = logging.getLogger("resume")
 
 
 def session_file(symbol: str) -> str:
-    return f"session_{symbol}.json"
+    """
+    Session files are stored in %APPDATA%/TraderBotV4/ (Windows) or
+    ~/.traderbotv4/ (other) — NEVER in the app install directory.
+
+    This prevents session files from being accidentally bundled into
+    the installer and shared between users/machines. Each machine
+    has its own session state tied to its own %APPDATA% folder.
+    """
+    import platform
+    import os
+    if platform.system() == "Windows":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        folder = os.path.join(base, "TraderBotV4", "sessions")
+    else:
+        folder = os.path.join(os.path.expanduser("~"),
+                              ".traderbotv4", "sessions")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, f"session_{symbol}.json")
 
 
 def save_session(state: SourceState):

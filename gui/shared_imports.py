@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
     QLabel, QPushButton, QGroupBox, QTextEdit, QFrame,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QDoubleSpinBox, QSpinBox, QComboBox, QSplitter, QSizePolicy,
+    QGridLayout,
     QProgressBar, QCheckBox, QScrollArea, QLineEdit,
     QSystemTrayIcon, QMenu, QAction,
 )

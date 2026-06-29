@@ -23,6 +23,10 @@ Endpoints:
   GET  /api/report → trade history summary
 """
 
+from core.license import validate_license, LicenseStatus
+from core.profile import load_profile, inject_into_config
+from core.watcher import WatcherThread
+import config as cfg
 import os
 import sys
 import json
@@ -52,15 +56,13 @@ from core.tunnel import tunnel as _tunnel, get_saved_url
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
-import config as cfg
-from core.watcher import WatcherThread
-from core.profile import load_profile, inject_into_config
-from core.license import validate_license, LicenseStatus
 
 # ── API key — change this or load from profile ────────────────────
 # Stored in %APPDATA%/TraderBotV4/api_key.txt
+
 def _get_api_key() -> str:
-    key_file = Path(os.environ.get("APPDATA", Path.home())) / "TraderBotV4" / "api_key.txt"
+    key_file = Path(os.environ.get("APPDATA", Path.home())) / \
+        "TraderBotV4" / "api_key.txt"
     if key_file.exists():
         return key_file.read_text().strip()
     # Generate and save a new key
@@ -72,6 +74,7 @@ def _get_api_key() -> str:
     print(f"  Saved to: {key_file}\n")
     return key
 
+
 API_KEY = _get_api_key()
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -80,21 +83,21 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 class BotState:
     def __init__(self):
-        self.lock            = threading.Lock()
+        self.lock = threading.Lock()
         self.worker: Optional[WatcherThread] = None
-        self.running         = False
-        self.log_lines       = deque(maxlen=200)
-        self.symbol          = ""
-        self.lot_size        = 0.01
-        self.lot_mode        = 1
-        self.risk_free        = False
-        self.loss_free        = False
-        self.tp_free          = False
-        self.balance          = 0.0
-        self.start_balance    = 0.0
-        self.target_balance   = 0.0
-        self.bias_latest      = {}
-        self.started_at       = None
+        self.running = False
+        self.log_lines = deque(maxlen=200)
+        self.symbol = ""
+        self.lot_size = 0.01
+        self.lot_mode = 1
+        self.risk_free = False
+        self.loss_free = False
+        self.tp_free = False
+        self.balance = 0.0
+        self.start_balance = 0.0
+        self.target_balance = 0.0
+        self.bias_latest = {}
+        self.started_at = None
 
     def add_log(self, msg: str, level: str = "INFO"):
         with self.lock:
@@ -184,7 +187,7 @@ async def get_status(_: str = Depends(verify_key)):
                         "tp":      p.tp,
                         "pnl":     round(p.profit, 2),
                         "pips":    round(abs(p.price_current - p.price_open) / cfg.PIP_SIZE
-                                   if hasattr(cfg, "PIP_SIZE") else 0, 1),
+                                         if hasattr(cfg, "PIP_SIZE") else 0, 1),
                     })
     except Exception:
         pass
@@ -249,12 +252,12 @@ async def start_bot(request: Request, _: str = Depends(verify_key)):
         return {"ok": False, "msg": "Bot already running"}
 
     body = await request.json()
-    sym      = body.get("symbol",   state.symbol or cfg.WATCH_SYMBOL)
-    lot      = float(body.get("lot_size",  state.lot_size))
-    mode     = int(body.get("lot_mode",    state.lot_mode))
-    rf       = bool(body.get("risk_free",  state.risk_free))
-    lf       = bool(body.get("loss_free",  state.loss_free))
-    tp_free  = bool(body.get("tp_free",    state.tp_free))
+    sym = body.get("symbol",   state.symbol or cfg.WATCH_SYMBOL)
+    lot = float(body.get("lot_size",  state.lot_size))
+    mode = int(body.get("lot_mode",    state.lot_mode))
+    rf = bool(body.get("risk_free",  state.risk_free))
+    lf = bool(body.get("loss_free",  state.loss_free))
+    tp_free = bool(body.get("tp_free",    state.tp_free))
 
     import MetaTrader5 as mt5
     if not mt5.initialize(login=cfg.MT5_LOGIN,
@@ -263,16 +266,17 @@ async def start_bot(request: Request, _: str = Depends(verify_key)):
         return {"ok": False, "msg": f"MT5 connect failed: {mt5.last_error()}"}
 
     acct = mt5.account_info()
-    state.balance       = acct.balance if acct else 0
+    state.balance = acct.balance if acct else 0
     state.start_balance = state.balance
-    state.target_balance = state.balance * (1 + getattr(cfg, "BALANCE_TP_RATIO", 0.10))
-    state.symbol        = sym
-    state.lot_size      = lot
-    state.lot_mode      = mode
-    state.risk_free     = rf
-    state.loss_free     = lf
-    state.tp_free       = tp_free
-    state.started_at    = datetime.datetime.now()
+    state.target_balance = state.balance * \
+        (1 + getattr(cfg, "BALANCE_TP_RATIO", 0.10))
+    state.symbol = sym
+    state.lot_size = lot
+    state.lot_mode = mode
+    state.risk_free = rf
+    state.loss_free = lf
+    state.tp_free = tp_free
+    state.started_at = datetime.datetime.now()
 
     def _log(msg, level="INFO"):
         state.add_log(msg, level)
@@ -288,7 +292,7 @@ async def start_bot(request: Request, _: str = Depends(verify_key)):
     def _on_bias(results):
         state.bias_latest = results
 
-    state.worker  = worker
+    state.worker = worker
     state.running = True
     worker.start()
 
@@ -302,7 +306,7 @@ async def stop_bot(_: str = Depends(verify_key)):
         return {"ok": False, "msg": "Bot not running"}
     if state.worker:
         state.worker.stop()
-        state.worker  = None
+        state.worker = None
     state.running = False
     state.add_log("■  Bot stopped", "INFO")
     return {"ok": True, "msg": "Bot stopped"}
@@ -315,12 +319,18 @@ async def update_settings(request: Request, _: str = Depends(verify_key)):
     body = await request.json()
     if state.running:
         return {"ok": False, "msg": "Stop the bot before changing settings"}
-    if "symbol"    in body: state.symbol    = body["symbol"]
-    if "lot_size"  in body: state.lot_size  = float(body["lot_size"])
-    if "lot_mode"  in body: state.lot_mode  = int(body["lot_mode"])
-    if "risk_free" in body: state.risk_free = bool(body["risk_free"])
-    if "loss_free" in body: state.loss_free = bool(body["loss_free"])
-    if "tp_free"   in body: state.tp_free   = bool(body["tp_free"])
+    if "symbol" in body:
+        state.symbol = body["symbol"]
+    if "lot_size" in body:
+        state.lot_size = float(body["lot_size"])
+    if "lot_mode" in body:
+        state.lot_mode = int(body["lot_mode"])
+    if "risk_free" in body:
+        state.risk_free = bool(body["risk_free"])
+    if "loss_free" in body:
+        state.loss_free = bool(body["loss_free"])
+    if "tp_free" in body:
+        state.tp_free = bool(body["tp_free"])
     return {"ok": True}
 
 
@@ -330,8 +340,8 @@ async def update_settings(request: Request, _: str = Depends(verify_key)):
 async def get_report(_: str = Depends(verify_key)):
     try:
         from core.trade_db import db as trade_db
-        stats  = trade_db.summary_stats(state.symbol or None)
-        daily  = trade_db.summary_by_day(state.symbol or None, days=30)
+        stats = trade_db.summary_stats(state.symbol or None)
+        daily = trade_db.summary_by_day(state.symbol or None, days=30)
         recent = trade_db.query_trades(
             symbol=state.symbol or None, limit=20)
         return {
@@ -360,11 +370,25 @@ def start_server(host: str = "0.0.0.0", port: int = 8000):
     # Load profile
     profile = load_profile()
     inject_into_config(profile)
-    state.symbol   = profile.get("watch_symbol", cfg.WATCH_SYMBOL)
+    state.symbol = profile.get("watch_symbol", cfg.WATCH_SYMBOL)
     state.lot_size = float(profile.get("lot_size", 0.01))
     state.lot_mode = int(profile.get("soft_lot_mode", 1))
 
-    # ── Start FastAPI server ──────────────────────────────────────
+    # ── Start FastAPI server (auto-finds free port) ───────────────
+    import socket as _sock
+
+    def _find_free_port(start: int) -> int:
+        for p in range(start, start + 10):
+            try:
+                with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
+                    s.bind(("0.0.0.0", p))
+                    return p
+            except OSError:
+                continue
+        return start  # fallback, will fail at bind but with clearer error
+
+    port = _find_free_port(port)
+
     server_thread = threading.Thread(
         target=uvicorn.run,
         args=(app,),
@@ -405,6 +429,7 @@ def start_server(host: str = "0.0.0.0", port: int = 8000):
         print("  ============================================================")
         print()
 
+    _tunnel.port = port
     _tunnel.start(on_url=on_tunnel_url)
     return server_thread
 

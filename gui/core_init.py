@@ -23,6 +23,7 @@ try:
 except ImportError:
     _HAS_SERVER = False
 
+
 class CoreInitMixin:
     def __init__(self):
         super().__init__()
@@ -36,7 +37,8 @@ class CoreInitMixin:
                 _start_api_server(host="0.0.0.0", port=8000)
             except Exception as _e:
                 import logging
-                logging.getLogger("gui").debug("API server failed to start: %s", _e)
+                logging.getLogger("gui").debug(
+                    "API server failed to start: %s", _e)
 
         self.setWindowTitle("TraderBot v4 — Rectangle-Anchored Recovery Bot")
         self.setMinimumSize(900, 660)
@@ -79,7 +81,7 @@ class CoreInitMixin:
 
         # Background update check — silent, non-blocking
         self._update_info = None
-        self._update_bar  = None   # injected into UI when update found
+        self._update_bar = None   # injected into UI when update found
         QTimer.singleShot(3000, self._start_update_check)
 
         # Price ticker
@@ -117,7 +119,7 @@ class CoreInitMixin:
         }
         if status == LicenseStatus.OK:
             if info:
-                user   = info.get("user", "")
+                user = info.get("user", "")
                 expiry = info.get("expiry", "never")
                 if user:
                     exp_str = f" ({expiry})" if expiry != "never" else ""
@@ -175,7 +177,8 @@ class CoreInitMixin:
             self._tray.show()
             notif_manager.tray_icon = self._tray
         except Exception as e:
-            import logging; logging.getLogger("gui").debug("Tray init failed: %s", e)
+            import logging
+            logging.getLogger("gui").debug("Tray init failed: %s", e)
 
     # ── Trade event recorder ──────────────────────────────────────
 
@@ -213,7 +216,8 @@ class CoreInitMixin:
         m = re.search(
             r"(risk.free|loss.free)\s+(BUY|SELL)\s+closed", msg, re.I)
         if m:
-            result = "risk_free" if "risk" in m.group(1).lower() else "loss_free"
+            result = "risk_free" if "risk" in m.group(
+                1).lower() else "loss_free"
             trade_db.record_trade(
                 symbol=sym, ticket=0, side=m.group(2).lower(),
                 lot=0, entry_price=0, exit_price=0,
@@ -243,7 +247,7 @@ class CoreInitMixin:
         info = self._update_info
         if not info:
             return
-        ver  = info.get("version", "?")
+        ver = info.get("version", "?")
         notes = info.get("release_notes", "")
 
         # Inject a slim update bar at the top of the left sidebar
@@ -257,7 +261,8 @@ class CoreInitMixin:
         bl.setContentsMargins(10, 6, 10, 6)
 
         lbl = QLabel(f"🆕  v{ver} available" + (f" — {notes}" if notes else ""))
-        lbl.setStyleSheet(f"color:{C['green']};font-size:12px;font-weight:bold;border:none;")
+        lbl.setStyleSheet(
+            f"color:{C['green']};font-size:12px;font-weight:bold;border:none;")
         bl.addWidget(lbl, 1)
 
         btn = QPushButton("Update Now")
@@ -309,7 +314,8 @@ class CoreInitMixin:
         dl_l.setSpacing(4)
 
         self._dl_lbl = QLabel("⬇  Downloading update…")
-        self._dl_lbl.setStyleSheet(f"color:{C['cyan']};font-size:12px;border:none;")
+        self._dl_lbl.setStyleSheet(
+            f"color:{C['cyan']};font-size:12px;border:none;")
         dl_l.addWidget(self._dl_lbl)
 
         self._dl_prog = QProgressBar()
@@ -340,7 +346,7 @@ class CoreInitMixin:
         if total > 0:
             pct = int(done * 100 / total)
             self._dl_prog.setValue(pct)
-            mb_done  = done  / (1024*1024)
+            mb_done = done / (1024*1024)
             mb_total = total / (1024*1024)
             self._dl_lbl.setText(f"⬇  {mb_done:.1f} / {mb_total:.1f} MB")
         else:

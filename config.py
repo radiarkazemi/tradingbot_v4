@@ -59,12 +59,16 @@ LOT_MODE_MARTINGALE = 3
 
 MAX_TOUCHES = 11    # touch_count > this -> kill switch. Modes 1/2 ONLY
 
+# ── Trailing SL (activates after R2) ────────────────────────────────────────
+TRAILING_STEP_PIPS = 5.0    # trail distance in pips
+
 # ── OB+FVG Entry Filter ───────────────────────────────────────────────────────
 # When True, the bot only enters if an OB+FVG confluence zone overlaps the
 # touched rectangle edge. Controlled from the GUI (entry filter toggle).
-ENTRY_FILTER_OB_FVG       = False   # master toggle (GUI overrides this)
-ENTRY_FILTER_OVERLAP_PIPS = 15.0    # tolerance: zone must be within N pips of edge
-ENTRY_FILTER_MIN_SCORE    = 10.0    # minimum confluence score to qualify
+ENTRY_FILTER_OB_FVG = False   # master toggle (GUI overrides this)
+# tolerance: zone must be within N pips of edge
+ENTRY_FILTER_OVERLAP_PIPS = 15.0
+ENTRY_FILTER_MIN_SCORE = 10.0    # minimum confluence score to qualify
 # (mode 3 has no touch cap, matching its original
 # behavior, and is bounded only by margin/confluence
 # gating + the account-level hard stop-loss below).

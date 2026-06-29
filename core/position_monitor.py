@@ -50,60 +50,69 @@ from core.position_recovery import _RecoveryMixin
 
 
 class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
-                   _ProtectionMixin, _RecoveryMixin):
-    IDLE      = "idle"
-    PENDING   = "pending"
-    ACTIVE    = "active"
+                  _ProtectionMixin, _RecoveryMixin):
+    IDLE = "idle"
+    PENDING = "pending"
+    ACTIVE = "active"
     EXHAUSTED = "exhausted"
 
     def __init__(self, name, rect_top, rect_bottom, pip_size, symbol, base_lot,
                  start_balance=0.0, log_fn=None, stop_fn=None, kill_fn=None,
                  risk_free_enabled=False, loss_free_enabled=False,
                  soft_lot_mode=1, tp_free=False,
-                 entry_filter_ob_fvg=False):
-        self.name          = name
+                 entry_filter_ob_fvg=False,
+                 partial_exit_r3=False,
+                 trailing_sl=False):
+        self.name = name
         # Fixed rectangle edges — NEVER move after registration. This
         # is the "distance" now: rect_top - rect_bottom. (item 5/11)
-        self.rect_top      = max(rect_top, rect_bottom)
-        self.rect_bottom   = min(rect_top, rect_bottom)
-        self.pip_size      = pip_size
-        self.symbol        = symbol
-        self.base_lot      = base_lot
+        self.rect_top = max(rect_top, rect_bottom)
+        self.rect_bottom = min(rect_top, rect_bottom)
+        self.pip_size = pip_size
+        self.symbol = symbol
+        self.base_lot = base_lot
         self.start_balance = start_balance
-        self._log          = log_fn or (lambda msg, level="INFO": log.info(msg))
-        self._stop_fn      = stop_fn
-        self._kill_fn      = kill_fn or stop_fn
+        self._log = log_fn or (lambda msg, level="INFO": log.info(msg))
+        self._stop_fn = stop_fn
+        self._kill_fn = kill_fn or stop_fn
         self._risk_free_enabled = risk_free_enabled
         self._loss_free_enabled = loss_free_enabled
-        self.soft_lot_mode      = soft_lot_mode if soft_lot_mode in (1, 2, 3) else 1
-        self.tp_free            = tp_free  # if True: no TP on any order (TP=0.0)
+        self.soft_lot_mode = soft_lot_mode if soft_lot_mode in (1, 2, 3) else 1
+        self.tp_free = tp_free  # if True: no TP on any order (TP=0.0)
         self._entry_filter_ob_fvg = entry_filter_ob_fvg
+        self._partial_exit_r3_enabled = partial_exit_r3
+        self._trailing_enabled = trailing_sl
+        self._trailing_enabled = False
+        self._trailing_buy_floor = 0.0
+        self._trailing_sell_floor = 0.0
 
-        self.state           = self.IDLE
-        self.round           = 0
+        self.state = self.IDLE
+        self.round = 0
 
-        self.buy_ticket      = None
-        self.sell_ticket     = None
-        self.buy_pos_ticket  = None
+        self.buy_ticket = None
+        self.sell_ticket = None
+        self.buy_pos_ticket = None
         self.sell_pos_ticket = None
 
-        self.buy_lot         = base_lot
-        self.sell_lot        = base_lot
-        self.buy_sl          = None
-        self.sell_sl         = None
-        self.buy_r_frozen    = 0.0
-        self.sell_r_frozen   = 0.0
-        self.buy_tp_frozen   = 0.0   # entry→TP distance frozen at confirmation
-        self.sell_tp_frozen  = 0.0
+        self.buy_lot = base_lot
+        self.sell_lot = base_lot
+        self.buy_sl = None
+        self.sell_sl = None
+        self.buy_r_frozen = 0.0
+        self.sell_r_frozen = 0.0
+        self.buy_tp_frozen = 0.0   # entry→TP distance frozen
+        self.sell_tp_frozen = 0.0
+        self.partial_exit_r3_done = {}   # {"buy": True/False}
+        self._partial_exit_r3_enabled = False
 
-        self._buy_confirmed  = False
+        self._buy_confirmed = False
         self._sell_confirmed = False
-        self._activated_at   = 0.0
-        self._last_bid       = 0.0
-        self._last_ask       = 0.0
+        self._activated_at = 0.0
+        self._last_bid = 0.0
+        self._last_ask = 0.0
 
-        self.registered_at   = 0
-        self.last_prev_t     = 0
+        self.registered_at = 0
+        self.last_prev_t = 0
 
         # ── Soft lot table (item 4) ───────────────────────────────
         # touch_count starts at 0 ("start" lot, both legs). Every
@@ -122,7 +131,7 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
         # opposite pending stop is left untouched. (unchanged from v3)
         self.loss_free_applied = {"buy": False, "sell": False}
         self.risk_free_applied = {"buy": False, "sell": False}
-        self.needs_full_reset  = False   # watcher checks/clears this
+        self.needs_full_reset = False   # watcher checks/clears this
 
         # Trader-adjustable override for the R1/R2 chart lines (item 9).
         # None = use the calculated price. If the trader drags the
@@ -142,7 +151,8 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
 
         # ── Tick-based touch detection (timeframe-immune) ─────────
         self._prev_tick_price = None   # last seen mid price, for crossing detection
-        self._rect_too_small_warned = False  # log the broker min-stop-distance warning once, not every touch
+        # log the broker min-stop-distance warning once, not every touch
+        self._rect_too_small_warned = False
 
         self._log(
             f"⚙️  [{self.name[:20]}] mode={self.soft_lot_mode} "
@@ -176,23 +186,23 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
     # ── Balance TP (R3) ──────────────────────────────────────────────
 
     def _check_activation(self):
-        pending   = {o.ticket for o in (mt5.orders_get(symbol=self.symbol) or [])
-                     if o.magic == MAGIC_NUMBER}
+        pending = {o.ticket for o in (mt5.orders_get(symbol=self.symbol) or [])
+                   if o.magic == MAGIC_NUMBER}
         positions = mt5.positions_get(symbol=self.symbol) or []
-        bot_pos   = [p for p in positions if p.magic == MAGIC_NUMBER]
-        buy_pos   = [p for p in bot_pos if p.type == 0]
-        sell_pos  = [p for p in bot_pos if p.type == 1]
+        bot_pos = [p for p in positions if p.magic == MAGIC_NUMBER]
+        buy_pos = [p for p in bot_pos if p.type == 0]
+        sell_pos = [p for p in bot_pos if p.type == 1]
 
-        buy_still  = self.buy_ticket  in pending if self.buy_ticket  else False
+        buy_still = self.buy_ticket in pending if self.buy_ticket else False
         sell_still = self.sell_ticket in pending if self.sell_ticket else False
-        buy_filled  = self.buy_ticket  is not None and not buy_still
+        buy_filled = self.buy_ticket is not None and not buy_still
         sell_filled = self.sell_ticket is not None and not sell_still
 
         if not buy_filled and not sell_filled:
             return
 
-        self._activated_at   = _time.time()
-        self._buy_confirmed  = False
+        self._activated_at = _time.time()
+        self._buy_confirmed = False
         self._sell_confirmed = False
 
         if buy_filled:
@@ -201,9 +211,9 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                 if self._check_entry_gap(pos, self.rect_top, is_buy=True):
                     return  # gap detected & handled — everything already closed/reset
                 self.buy_pos_ticket = pos.ticket
-                self.buy_sl         = pos.sl
-                self.buy_r_frozen   = abs(pos.price_open - pos.sl)
-                self.buy_lot        = pos.volume
+                self.buy_sl = pos.sl
+                self.buy_r_frozen = abs(pos.price_open - pos.sl)
+                self.buy_lot = pos.volume
                 self._buy_confirmed = True
             self.buy_ticket = None
 
@@ -213,9 +223,9 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                 if self._check_entry_gap(pos, self.rect_bottom, is_buy=False):
                     return  # gap detected & handled — everything already closed/reset
                 self.sell_pos_ticket = pos.ticket
-                self.sell_sl         = pos.sl
-                self.sell_r_frozen   = abs(pos.price_open - pos.sl)
-                self.sell_lot        = pos.volume
+                self.sell_sl = pos.sl
+                self.sell_r_frozen = abs(pos.price_open - pos.sl)
+                self.sell_lot = pos.volume
                 self._sell_confirmed = True
             self.sell_ticket = None
 
@@ -267,14 +277,14 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
     # ── Active leg monitoring ─────────────────────────────────────
 
     def _check_legs(self):
-        now      = _time.time()
+        now = _time.time()
         in_grace = (now - self._activated_at) < ACTIVATION_GRACE_SEC
 
-        positions    = mt5.positions_get(symbol=self.symbol) or []
-        bot_pos      = [p for p in positions if p.magic == MAGIC_NUMBER]
+        positions = mt5.positions_get(symbol=self.symbol) or []
+        bot_pos = [p for p in positions if p.magic == MAGIC_NUMBER]
         open_tickets = {p.ticket for p in bot_pos}
-        buy_pos      = [p for p in bot_pos if p.type == 0]
-        sell_pos     = [p for p in bot_pos if p.type == 1]
+        buy_pos = [p for p in bot_pos if p.type == 0]
+        sell_pos = [p for p in bot_pos if p.type == 1]
 
         pending = {o.ticket for o in (mt5.orders_get(symbol=self.symbol) or [])
                    if o.magic == MAGIC_NUMBER}
@@ -286,10 +296,11 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                 if self._check_entry_gap(pos, self.rect_top, is_buy=True):
                     return  # gap detected & handled — everything already closed/reset
                 self.buy_pos_ticket = pos.ticket
-                self.buy_sl         = pos.sl
-                self.buy_r_frozen   = abs(pos.price_open - pos.sl)
-                self.buy_tp_frozen  = abs(pos.tp - pos.price_open) if pos.tp and pos.tp > pos.price_open else 0.0
-                self.buy_lot        = pos.volume
+                self.buy_sl = pos.sl
+                self.buy_r_frozen = abs(pos.price_open - pos.sl)
+                self.buy_tp_frozen = abs(
+                    pos.tp - pos.price_open) if pos.tp and pos.tp > pos.price_open else 0.0
+                self.buy_lot = pos.volume
                 self._buy_confirmed = True
                 self._log(
                     f"🔍  [{self.name[:20]}] BUY pos confirmed "
@@ -302,10 +313,11 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                 if self._check_entry_gap(pos, self.rect_bottom, is_buy=False):
                     return  # gap detected & handled — everything already closed/reset
                 self.sell_pos_ticket = pos.ticket
-                self.sell_sl         = pos.sl
-                self.sell_r_frozen   = abs(pos.price_open - pos.sl)
-                self.sell_tp_frozen  = abs(pos.price_open - pos.tp) if pos.tp and pos.tp < pos.price_open else 0.0
-                self.sell_lot        = pos.volume
+                self.sell_sl = pos.sl
+                self.sell_r_frozen = abs(pos.price_open - pos.sl)
+                self.sell_tp_frozen = abs(
+                    pos.price_open - pos.tp) if pos.tp and pos.tp < pos.price_open else 0.0
+                self.sell_lot = pos.volume
                 self._sell_confirmed = True
                 self._log(
                     f"🔍  [{self.name[:20]}] SELL pos confirmed "
@@ -320,11 +332,11 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                 if self._check_entry_gap(pos, self.rect_top, is_buy=True):
                     return  # gap detected & handled — everything already closed/reset
                 self.buy_pos_ticket = pos.ticket
-                self.buy_sl         = pos.sl
-                self.buy_r_frozen   = abs(pos.price_open - pos.sl)
-                self.buy_lot        = pos.volume
+                self.buy_sl = pos.sl
+                self.buy_r_frozen = abs(pos.price_open - pos.sl)
+                self.buy_lot = pos.volume
                 self._buy_confirmed = True
-                self.buy_ticket     = None
+                self.buy_ticket = None
                 if self.soft_lot_mode == 3:
                     next_lot = self._next_table_lot(base_lot=self.buy_lot)
                     if next_lot is None:
@@ -350,11 +362,11 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                 if self._check_entry_gap(pos, self.rect_bottom, is_buy=False):
                     return  # gap detected & handled — everything already closed/reset
                 self.sell_pos_ticket = pos.ticket
-                self.sell_sl         = pos.sl
-                self.sell_r_frozen   = abs(pos.price_open - pos.sl)
-                self.sell_lot        = pos.volume
+                self.sell_sl = pos.sl
+                self.sell_r_frozen = abs(pos.price_open - pos.sl)
+                self.sell_lot = pos.volume
                 self._sell_confirmed = True
-                self.sell_ticket     = None
+                self.sell_ticket = None
                 if self.soft_lot_mode == 3:
                     next_lot = self._next_table_lot(base_lot=self.sell_lot)
                     if next_lot is None:
@@ -387,6 +399,12 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
 
         # ── R2 Risk-Free: move SL to lock cumulative_loss+risk once ≥2R ─
         self._check_risk_free(buy_pos, sell_pos)
+
+        # ── Trailing SL: follows price after R2 locks the SL ────────
+        self._check_trailing_sl(buy_pos, sell_pos)
+
+        # ── R3 Partial Exit: close 70% when price reaches TP ───────
+        self._check_partial_exit_r3(buy_pos, sell_pos)
 
         # ── Detect closed positions → place new stop ──────────────
         # Pass the EXACT price the closed position's SL executed at,
@@ -539,11 +557,14 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                 and not self.loss_free_applied.get("buy", False)):
             pos = sorted(buy_pos, key=lambda p: p.time, reverse=True)[0]
             target_tp = self._buy_tp_price
-            # Only bother re-sending if the change is more than a
-            # rounding/float-noise difference, to avoid spamming
-            # order_send every single scan for a no-op change.
             if abs(pos.tp - target_tp) > self.pip_size * 0.9:
                 self._move_position_tp(pos.ticket, target_tp)
+            # Freeze tp_dist the FIRST time a real TP is established.
+            # At order confirmation pos.tp is often 0; this catches it
+            # as soon as _resync_open_tp sets the real balance-target TP.
+            if (getattr(self, "buy_tp_frozen", 0.0) <= 0
+                    and target_tp > pos.price_open):
+                self.buy_tp_frozen = abs(target_tp - pos.price_open)
 
         if (sell_pos and not self.risk_free_applied.get("sell", False)
                 and not self.loss_free_applied.get("sell", False)):
@@ -551,6 +572,10 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
             target_tp = self._sell_tp_price
             if abs(pos.tp - target_tp) > self.pip_size * 0.9:
                 self._move_position_tp(pos.ticket, target_tp)
+            # Same freeze for SELL (TP is below entry for SELL)
+            if (getattr(self, "sell_tp_frozen", 0.0) <= 0
+                    and target_tp < pos.price_open):
+                self.sell_tp_frozen = abs(pos.price_open - target_tp)
 
     def reset(self, final: bool = True):
         """
@@ -577,28 +602,31 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
         for ticket in [self.buy_ticket, self.sell_ticket]:
             if ticket:
                 cancel_order(ticket)
-        self.buy_ticket      = None
-        self.sell_ticket     = None
-        self.buy_pos_ticket  = None
+        self.buy_ticket = None
+        self.sell_ticket = None
+        self.buy_pos_ticket = None
         self.sell_pos_ticket = None
-        self.buy_lot         = self.base_lot
-        self.sell_lot        = self.base_lot
-        self.buy_sl          = None
-        self.sell_sl         = None
-        self.buy_r_frozen    = 0.0
-        self.sell_r_frozen   = 0.0
-        self.buy_tp_frozen   = 0.0
-        self.sell_tp_frozen  = 0.0
-        self.round           = 0
-        self.touch_count     = 0
-        self.state           = self.EXHAUSTED if final else self.IDLE
-        self._buy_confirmed  = False
+        self.buy_lot = self.base_lot
+        self.sell_lot = self.base_lot
+        self.buy_sl = None
+        self.sell_sl = None
+        self.buy_r_frozen = 0.0
+        self.sell_r_frozen = 0.0
+        self.buy_tp_frozen = 0.0
+        self.sell_tp_frozen = 0.0
+        self.partial_exit_r3_done = {}
+        self._trailing_buy_floor = 0.0
+        self._trailing_sell_floor = 0.0
+        self.round = 0
+        self.touch_count = 0
+        self.state = self.EXHAUSTED if final else self.IDLE
+        self._buy_confirmed = False
         self._sell_confirmed = False
         self.risk_free_applied = {"buy": False, "sell": False}
         self.loss_free_applied = {"buy": False, "sell": False}
         self.override_r1_price = {"buy": None, "sell": None}
         self.override_r2_price = {"buy": None, "sell": None}
-        self.cumulative_loss   = 0.0
+        self.cumulative_loss = 0.0
         self._pip_value_per_base_lot = 0.0
         self._log(
             f"🔄  [{self.name[:20]}] state reset to "

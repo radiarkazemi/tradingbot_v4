@@ -237,4 +237,7 @@ installer_output/       # compiled installer
 __pycache__/
 *.pyc
 
-*.exe
+# Session files — machine-specific, must NEVER be committed or bundled
+session_*.json
+
+installer_output/
