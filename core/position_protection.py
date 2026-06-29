@@ -137,6 +137,10 @@ class _ProtectionMixin:
         sibling order back to the rectangle edge after the first
         leg filled with a gap, without cancelling anything.
 
+        Handles MT5 retcode 10025 ("No changes"): if the order price
+        already matches new_entry, treat it as success so the round
+        is NOT aborted unnecessarily.
+
         Returns True on success, False on failure.
         """
         try:
@@ -144,6 +148,12 @@ class _ProtectionMixin:
             target = next((o for o in orders if o.ticket == ticket), None)
             if not target:
                 return False  # order already gone (filled or cancelled)
+
+            # Already at the correct price — nothing to modify
+            digits = getattr(mt5.symbol_info(self.symbol), "digits", 5)
+            tolerance = 10 ** -digits
+            if abs(target.price_open - new_entry) < tolerance:
+                return True  # already correct, treat as success
 
             res = mt5.order_send({
                 "action":   mt5.TRADE_ACTION_MODIFY,
@@ -154,9 +164,21 @@ class _ProtectionMixin:
             })
             if res and res.retcode == mt5.TRADE_RETCODE_DONE:
                 return True
+
+            # retcode 10025 = "No changes" — verify order was actually updated
+            if res and res.retcode == 10025:
+                import time as _t
+                _t.sleep(0.1)
+                orders2 = mt5.orders_get(symbol=self.symbol) or []
+                t2 = next((o for o in orders2 if o.ticket == ticket), None)
+                if t2 and abs(t2.price_open - new_entry) < tolerance:
+                    return True  # applied silently
+                return False    # genuine no-change, entry stayed wrong
+
             self._log(
                 f"⚠️  [{self.name[:20]}] pending order modify failed "
-                f"#{ticket}: {getattr(res, 'comment', 'unknown')}", "WARN"
+                f"#{ticket}: {getattr(res, 'comment', res.retcode if res else 'no response')}",
+                "WARN"
             )
             return False
         except Exception as e:
@@ -393,7 +415,7 @@ class _ProtectionMixin:
         if self.cumulative_loss > 0:
             dpp = self._dollar_per_pip(lot)
             if dpp > 0:
-                loss_pips    = (self.cumulative_loss * 2.0) / dpp
+                loss_pips = (self.cumulative_loss * 2.0) / dpp
                 loss_coverage = loss_pips * self.pip_size
 
         return max(two_thirds, loss_coverage)
@@ -538,20 +560,24 @@ class _ProtectionMixin:
         if buy_pos and not self.risk_free_applied.get("buy", False):
             pos = sorted(buy_pos, key=lambda p: p.time, reverse=True)[0]
             # Use TP-based geometry: trigger at 2/3 of entry→TP range
-            tp_dist = (pos.tp - pos.price_open) if pos.tp and pos.tp > pos.price_open else 0.0
+            tp_dist = (
+                pos.tp - pos.price_open) if pos.tp and pos.tp > pos.price_open else 0.0
             if tp_dist > 0:
-                profit_dist  = pos.price_current - pos.price_open
+                profit_dist = pos.price_current - pos.price_open
                 trigger_dist = tp_dist * (2.0 / 3.0)
                 if profit_dist >= trigger_dist:
                     lot_for_lock = pos.volume
-                    clamped  = False
+                    clamped = False
                     lock_dist = 0.0
                     if self.override_r2_price.get("buy") is not None:
-                        new_sl    = _round_price(self.override_r2_price["buy"], self.symbol)
+                        new_sl = _round_price(
+                            self.override_r2_price["buy"], self.symbol)
                         lock_dist = new_sl - pos.price_open
                     else:
-                        lock_dist = self._risk_free_lock_distance(lot_for_lock, tp_dist)
-                        new_sl    = _round_price(pos.price_open + lock_dist, self.symbol)
+                        lock_dist = self._risk_free_lock_distance(
+                            lot_for_lock, tp_dist)
+                        new_sl = _round_price(
+                            pos.price_open + lock_dist, self.symbol)
                     new_sl, clamped = self._clamp_sl_to_valid_range(
                         new_sl, pos, is_buy=True)
                     if clamped:
@@ -563,9 +589,10 @@ class _ProtectionMixin:
                     if self._move_position_sl(pos.ticket, new_sl):
                         self.risk_free_applied["buy"] = True
                         locked_pips = lock_dist / self.pip_size
-                        locked_usd  = locked_pips * self._dollar_per_pip(lot_for_lock)
-                        pct         = profit_dist / tp_dist * 100
-                        loss_note   = (
+                        locked_usd = locked_pips * \
+                            self._dollar_per_pip(lot_for_lock)
+                        pct = profit_dist / tp_dist * 100
+                        loss_note = (
                             f" | covers loss×2=${self.cumulative_loss*2:.2f}"
                             if self.cumulative_loss > 0 else ""
                         )
@@ -581,21 +608,25 @@ class _ProtectionMixin:
             pos = sorted(sell_pos, key=lambda p: p.time, reverse=True)[0]
             # SELL profits when price goes DOWN.
             # tp_dist = distance from entry DOWN to TP
-            tp_dist = (pos.price_open - pos.tp) if pos.tp and pos.tp < pos.price_open else 0.0
+            tp_dist = (pos.price_open -
+                       pos.tp) if pos.tp and pos.tp < pos.price_open else 0.0
             if tp_dist > 0:
-                profit_dist  = pos.price_open - pos.price_current
+                profit_dist = pos.price_open - pos.price_current
                 trigger_dist = tp_dist * (2.0 / 3.0)
                 if profit_dist >= trigger_dist:
                     lot_for_lock = pos.volume
-                    clamped  = False
+                    clamped = False
                     lock_dist = 0.0
                     if self.override_r2_price.get("sell") is not None:
-                        new_sl    = _round_price(self.override_r2_price["sell"], self.symbol)
+                        new_sl = _round_price(
+                            self.override_r2_price["sell"], self.symbol)
                         lock_dist = pos.price_open - new_sl
                     else:
-                        lock_dist = self._risk_free_lock_distance(lot_for_lock, tp_dist)
+                        lock_dist = self._risk_free_lock_distance(
+                            lot_for_lock, tp_dist)
                         # SELL: SL goes ABOVE entry to lock profit
-                        new_sl    = _round_price(pos.price_open + lock_dist, self.symbol)
+                        new_sl = _round_price(
+                            pos.price_open + lock_dist, self.symbol)
                     new_sl, clamped = self._clamp_sl_to_valid_range(
                         new_sl, pos, is_buy=False)
                     if clamped:
@@ -606,16 +637,20 @@ class _ProtectionMixin:
                         )
                     if self._move_position_sl(pos.ticket, new_sl):
                         self.risk_free_applied["sell"] = True
-                        locked_profit = lock_dist / self.pip_size * self._dollar_per_pip(lot_for_lock)
-                        coverage = (
-                            "partial (clamped)" if clamped else
-                            f"covers session losses ${self.cumulative_loss:.2f} "
-                            f"+ 1R profit locked ≈${locked_profit:.2f}"
+                        locked_pips = lock_dist / self.pip_size
+                        locked_usd = locked_pips * \
+                            self._dollar_per_pip(lot_for_lock)
+                        pct = profit_dist / tp_dist * 100
+                        loss_note = (
+                            f" | covers loss×2=${self.cumulative_loss*2:.2f}"
+                            if self.cumulative_loss > 0 else ""
                         )
                         self._log(
                             f"🛡️  [{self.name[:20]}] SELL risk-free (R2) | "
-                            f"profit={profit_dist:.5f} ≥ {trigger_r}R={trigger_r*r:.5f} | "
-                            f"SL → {new_sl:.5f} ({coverage})", "NEW"
+                            f"price at {pct:.0f}% of TP range ≥ 67% trigger | "
+                            f"SL → {new_sl:.5f} "
+                            f"(locks ≈${locked_usd:.2f} / {locked_pips:.1f}pips{loss_note})",
+                            "NEW"
                         )
 
         # ── Trader-adjusted override, post-application ─────────────
@@ -718,7 +753,8 @@ class _ProtectionMixin:
                         # Fall back to R1 (loss-free) level = entry + session-loss coverage
                         lock_dist = self._loss_free_lock_distance(pos.volume)
                         fallback_sl, _c = self._clamp_sl_to_valid_range(
-                            _round_price(pos.price_open + lock_dist, self.symbol),
+                            _round_price(pos.price_open +
+                                         lock_dist, self.symbol),
                             pos, is_buy=True)
                         self._move_position_sl(pos.ticket, fallback_sl)
                         self._log(f"🛡️  [{self.name[:20]}] Risk-Free disabled — BUY SL fell back "
@@ -743,7 +779,8 @@ class _ProtectionMixin:
                     if self._loss_free_enabled and self.loss_free_applied.get("sell", False):
                         lock_dist = self._loss_free_lock_distance(pos.volume)
                         fallback_sl, _c = self._clamp_sl_to_valid_range(
-                            _round_price(pos.price_open - lock_dist, self.symbol),
+                            _round_price(pos.price_open -
+                                         lock_dist, self.symbol),
                             pos, is_buy=False)
                         self._move_position_sl(pos.ticket, fallback_sl)
                         self._log(f"🛡️  [{self.name[:20]}] Risk-Free disabled — SELL SL fell back "
