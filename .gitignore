@@ -236,3 +236,5 @@ build/                  # PyInstaller temp files
 installer_output/       # compiled installer
 __pycache__/
 *.pyc
+
+*.exe

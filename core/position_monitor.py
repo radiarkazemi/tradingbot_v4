@@ -93,6 +93,8 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
         self.sell_sl         = None
         self.buy_r_frozen    = 0.0
         self.sell_r_frozen   = 0.0
+        self.buy_tp_frozen   = 0.0   # entry→TP distance frozen at confirmation
+        self.sell_tp_frozen  = 0.0
 
         self._buy_confirmed  = False
         self._sell_confirmed = False
@@ -286,6 +288,7 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                 self.buy_pos_ticket = pos.ticket
                 self.buy_sl         = pos.sl
                 self.buy_r_frozen   = abs(pos.price_open - pos.sl)
+                self.buy_tp_frozen  = abs(pos.tp - pos.price_open) if pos.tp and pos.tp > pos.price_open else 0.0
                 self.buy_lot        = pos.volume
                 self._buy_confirmed = True
                 self._log(
@@ -301,6 +304,7 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                 self.sell_pos_ticket = pos.ticket
                 self.sell_sl         = pos.sl
                 self.sell_r_frozen   = abs(pos.price_open - pos.sl)
+                self.sell_tp_frozen  = abs(pos.price_open - pos.tp) if pos.tp and pos.tp < pos.price_open else 0.0
                 self.sell_lot        = pos.volume
                 self._sell_confirmed = True
                 self._log(
@@ -583,6 +587,8 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
         self.sell_sl         = None
         self.buy_r_frozen    = 0.0
         self.sell_r_frozen   = 0.0
+        self.buy_tp_frozen   = 0.0
+        self.sell_tp_frozen  = 0.0
         self.round           = 0
         self.touch_count     = 0
         self.state           = self.EXHAUSTED if final else self.IDLE

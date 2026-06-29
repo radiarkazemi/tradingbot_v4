@@ -347,7 +347,7 @@ async def get_report(_: str = Depends(verify_key)):
 
 def start_server(host: str = "0.0.0.0", port: int = 8000):
     """
-    Start the API server + Cloudflare tunnel in background threads.
+    Start the API server + ngrok tunnel in background threads.
     The tunnel gives a public HTTPS URL that works from anywhere
     in the world — no port forwarding, no router config needed.
     """
@@ -374,7 +374,7 @@ def start_server(host: str = "0.0.0.0", port: int = 8000):
     server_thread.start()
     time.sleep(1.0)  # brief wait for server to bind
 
-    # ── Start Cloudflare tunnel ───────────────────────────────────
+    # ── Start ngrok tunnel ───────────────────────────────────────
     print()
     print("  ============================================================")
     print("    TraderBot v4 — Remote Control")
@@ -385,9 +385,9 @@ def start_server(host: str = "0.0.0.0", port: int = 8000):
     saved = get_saved_url()
     if saved:
         print(f"  Last URL: {saved}")
-        print("  (Starting tunnel — new URL will appear below)")
+        print("  (Starting ngrok tunnel — new URL will appear in ~10 seconds)")
     else:
-        print("  Starting Cloudflare tunnel...")
+        print("  Starting ngrok tunnel (downloading ngrok.exe if needed)...")
     print()
 
     def on_tunnel_url(url: str):
