@@ -95,7 +95,17 @@ if "%SKIP_INSTALLER%"=="1" (
 echo.
 
 :: ── Step 1: Inject secret ─────────────────────────────────────────
-echo  [2/4] Injecting license secret...
+echo  [2/5] Scanning for hardcoded credentials...
+python verify_no_credentials.py
+if errorlevel 1 (
+    echo.
+    echo  BUILD ABORTED — see above for details.
+    echo.
+    pause & exit /b 1
+)
+echo.
+
+echo  [3/5] Injecting license secret...
 python inject_secret.py
 if errorlevel 1 (
     echo.
@@ -105,7 +115,7 @@ if errorlevel 1 (
 echo.
 
 :: ── Step 2: Install deps + build EXE ─────────────────────────────
-echo  [3/4] Building EXE...
+echo  [4/5] Building EXE...
 echo.
 
 python -m pip install pyinstaller --upgrade --quiet --no-warn-script-location
@@ -137,7 +147,7 @@ if exist "installer_output\TraderBotV4_Setup_v4.0.0.exe" (
 )
 
 if "%SKIP_INSTALLER%"=="1" (
-    echo  [4/4] Skipping installer ^(Inno Setup not installed^)
+    echo  [5/5] Skipping installer ^(Inno Setup not installed^)
     echo.
     echo  ============================================================
     echo  PARTIAL COMPLETE — EXE only
@@ -152,7 +162,7 @@ if "%SKIP_INSTALLER%"=="1" (
     pause & exit /b 0
 )
 
-echo  [4/4] Creating installer...
+echo  [5/5] Creating installer...
 echo.
 
 if exist installer_output rmdir /s /q installer_output

@@ -6,14 +6,24 @@
 """
 
 # ── MT5 CREDENTIALS ──────────────────────────────────────────────
-# MT5_LOGIN = 52936622
-# MT5_PASSWORD = "@Radiar9841@"
-# MT5_SERVER = "Alpari-MT5-Demo"
-
-
-MT5_LOGIN = 91246510
-MT5_PASSWORD = "@Radiar9841@"
-MT5_SERVER = "LiteFinance-MT5-Demo"
+# DO NOT hardcode real credentials here. These defaults are EMPTY
+# on purpose — every user's real login/password/server lives in
+# %APPDATA%/TraderBotV4/profile.json (per-machine, never bundled
+# into the installer, never committed to git) and is injected at
+# runtime by core.profile.inject_into_config() before the watcher
+# connects.
+#
+# For local developer testing ONLY, set environment variables
+# instead of editing this file:
+#   set TB4_MT5_LOGIN=12345678
+#   set TB4_MT5_PASSWORD=yourpassword
+#   set TB4_MT5_SERVER=YourBroker-Demo
+#   set TB4_MT5_PATH=C:\Program Files\YourBroker MT5\terminal64.exe
+import os as _os
+MT5_LOGIN    = int(_os.environ.get("TB4_MT5_LOGIN", "0") or "0")
+MT5_PASSWORD = _os.environ.get("TB4_MT5_PASSWORD", "")
+MT5_SERVER   = _os.environ.get("TB4_MT5_SERVER", "")
+MT5_PATH     = _os.environ.get("TB4_MT5_PATH", "")
 
 # ── SYMBOL TO WATCH ──────────────────────────────────────────────
 WATCH_SYMBOL = "EURUSD"
@@ -60,15 +70,14 @@ LOT_MODE_MARTINGALE = 3
 MAX_TOUCHES = 11    # touch_count > this -> kill switch. Modes 1/2 ONLY
 
 # ── Trailing SL (activates after R2) ────────────────────────────────────────
-TRAILING_STEP_PIPS = 5.0    # trail distance in pips
+TRAILING_STEP_PIPS        = 5.0    # trail distance in pips
 
 # ── OB+FVG Entry Filter ───────────────────────────────────────────────────────
 # When True, the bot only enters if an OB+FVG confluence zone overlaps the
 # touched rectangle edge. Controlled from the GUI (entry filter toggle).
-ENTRY_FILTER_OB_FVG = False   # master toggle (GUI overrides this)
-# tolerance: zone must be within N pips of edge
-ENTRY_FILTER_OVERLAP_PIPS = 15.0
-ENTRY_FILTER_MIN_SCORE = 10.0    # minimum confluence score to qualify
+ENTRY_FILTER_OB_FVG       = False   # master toggle (GUI overrides this)
+ENTRY_FILTER_OVERLAP_PIPS = 15.0    # tolerance: zone must be within N pips of edge
+ENTRY_FILTER_MIN_SCORE    = 10.0    # minimum confluence score to qualify
 # (mode 3 has no touch cap, matching its original
 # behavior, and is bounded only by margin/confluence
 # gating + the account-level hard stop-loss below).

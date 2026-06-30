@@ -20,7 +20,6 @@ from typing import Optional
 
 # ── Profile file location ─────────────────────────────────────────
 
-
 def _profile_dir() -> str:
     if platform.system() == "Windows":
         base = os.environ.get("APPDATA", os.path.expanduser("~"))
@@ -66,6 +65,9 @@ DEFAULT_PROFILE = {
     "mt5_login":     "",
     "mt5_password":  "",   # stored obfuscated
     "mt5_server":    "",
+    "mt5_path":      "",   # full path to terminal64.exe — REQUIRED if multiple
+                            # MT5 installs exist (different brokers). Leave empty
+                            # to let MT5 auto-detect (only safe with ONE install).
     "watch_symbol":  "EURUSD",
     "lot_size":      0.01,
     "soft_lot_mode": 1,
@@ -125,11 +127,12 @@ def inject_into_config(profile: dict):
     """
     import config as cfg
     try:
-        cfg.MT5_LOGIN = int(profile.get("mt5_login", 0))
+        cfg.MT5_LOGIN    = int(profile.get("mt5_login", 0))
     except (ValueError, TypeError):
-        cfg.MT5_LOGIN = 0
+        cfg.MT5_LOGIN    = 0
     cfg.MT5_PASSWORD = profile.get("mt5_password", "")
-    cfg.MT5_SERVER = profile.get("mt5_server",   "")
+    cfg.MT5_SERVER   = profile.get("mt5_server",   "")
+    cfg.MT5_PATH     = profile.get("mt5_path",     "")
     cfg.WATCH_SYMBOL = profile.get("watch_symbol", "EURUSD")
-    cfg.LOT_SIZE = float(profile.get("lot_size", 0.01))
+    cfg.LOT_SIZE     = float(profile.get("lot_size", 0.01))
     cfg.SOFT_LOT_MODE = int(profile.get("soft_lot_mode", 1))

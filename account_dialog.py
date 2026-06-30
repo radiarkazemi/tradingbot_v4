@@ -97,10 +97,8 @@ def _divider():
 def _lbl(text, color=None, size=13, bold=False):
     l = QLabel(text)
     s = f"font-size:{size}px;"
-    if color:
-        s += f"color:{color};"
-    if bold:
-        s += "font-weight:bold;"
+    if color: s += f"color:{color};"
+    if bold:  s += "font-weight:bold;"
     l.setStyleSheet(s)
     return l
 
@@ -130,7 +128,7 @@ class AccountDialog(QDialog):
             Qt.Dialog | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
 
         self._profile = dict(profile) if profile else {}
-        self._notif = notif_settings
+        self._notif   = notif_settings
 
         self._build_ui()
         self._load_profile()
@@ -239,6 +237,29 @@ class AccountDialog(QDialog):
         self.inp_server = QLineEdit()
         self.inp_server.setPlaceholderText("e.g. LiteFinance-MT5-Demo")
         vl.addWidget(self.inp_server)
+        vl.addSpacing(4)
+
+        vl.addWidget(_lbl("MT5 Terminal Path (only if multiple MT5 installs)",
+                          C['txt2'], 11))
+        path_row = QHBoxLayout()
+        self.inp_mt5_path = QLineEdit()
+        self.inp_mt5_path.setPlaceholderText(
+            "Leave empty if you only have ONE MT5 installed")
+        self.inp_mt5_path.setToolTip(
+            "REQUIRED if you have MT5 from more than one broker installed.\n"
+            "Without this, the bot may connect to the WRONG broker's "
+            "terminal and fail with 'Authorization failed' even though "
+            "your login/password/server are correct.\n\n"
+            "Find this path by right-clicking your MT5 desktop icon → "
+            "Properties → Target field, or by browsing to the install "
+            "folder and selecting terminal64.exe")
+        path_row.addWidget(self.inp_mt5_path)
+        btn_browse = QPushButton("...")
+        btn_browse.setFixedWidth(34)
+        btn_browse.setToolTip("Browse for terminal64.exe")
+        btn_browse.clicked.connect(self._browse_mt5_path)
+        path_row.addWidget(btn_browse)
+        vl.addLayout(path_row)
         vl.addSpacing(4)
 
         self.err_lbl = QLabel("")
@@ -429,6 +450,16 @@ class AccountDialog(QDialog):
         vl.addStretch()
         return w
 
+    def _browse_mt5_path(self):
+        from PyQt5.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select terminal64.exe",
+            "C:\\Program Files",
+            "MT5 Terminal (terminal64.exe);;All files (*.exe)"
+        )
+        if path:
+            self.inp_mt5_path.setText(path)
+
     # ── Load / Save ───────────────────────────────────────────────
 
     def _load_profile(self):
@@ -437,6 +468,7 @@ class AccountDialog(QDialog):
         self.inp_login.setText(str(p.get("mt5_login", "")))
         self.inp_pw.setText(p.get("mt5_password", ""))
         self.inp_server.setText(p.get("mt5_server", ""))
+        self.inp_mt5_path.setText(p.get("mt5_path", ""))
         self.inp_symbol.setText(p.get("watch_symbol", "EURUSD"))
         self.spin_lot.setValue(float(p.get("lot_size", 0.01)))
         self.combo_mode.setCurrentIndex(
@@ -462,6 +494,7 @@ class AccountDialog(QDialog):
             "mt5_login":     login,
             "mt5_password":  self.inp_pw.text(),
             "mt5_server":    self.inp_server.text().strip(),
+            "mt5_path":      self.inp_mt5_path.text().strip(),
             "watch_symbol":  self.inp_symbol.text().strip() or "EURUSD",
             "lot_size":      self.spin_lot.value(),
             "soft_lot_mode": {0: 1, 1: 2, 2: 3}.get(
@@ -483,7 +516,7 @@ class AccountDialog(QDialog):
                 ev_cfg = self._notif.settings.events.get(ev_type)
                 if ev_cfg:
                     ev_cfg.enabled = chk_n.isChecked()
-                    ev_cfg.sound = chk_s.isChecked()
+                    ev_cfg.sound   = chk_s.isChecked()
 
         self.profile_saved.emit(self._profile)
         self._status_lbl.setText("✅  Saved")

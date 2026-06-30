@@ -251,8 +251,8 @@ class WatcherThread(threading.Thread):
             1, 2, 3) else 1
         self._tp_free = tp_free
         self._entry_filter_ob_fvg = entry_filter_ob_fvg
-        self._partial_exit_r3 = partial_exit_r3
-        self._trailing_sl = trailing_sl
+        self._partial_exit_r3     = partial_exit_r3
+        self._trailing_sl         = trailing_sl
         self.sig = WatcherSignals()
         self._stop_event = threading.Event()
         self._sources: dict[str, SourceState] = {}
@@ -783,11 +783,47 @@ class WatcherThread(threading.Thread):
         MAX_ATTEMPTS = 5
         last_error = None
 
+        # Refuse to even try if no credentials are configured at all —
+        # this is the #1 cause of "Authorization failed": the user
+        # skipped/closed the setup wizard and the bot has blank/zero
+        # credentials, not a real login problem.
+        if not cfg.MT5_LOGIN or not cfg.MT5_PASSWORD or not cfg.MT5_SERVER:
+            self.log(
+                "❌ No MT5 account configured.\n"
+                "   Open ⚙ Account & Settings and enter your MT5 "
+                "account number, password, and server, then try again.",
+                "ERROR"
+            )
+            self.sig.emit_status("❌  No account configured")
+            return False
+
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
-                ok = mt5.initialize(login=cfg.MT5_LOGIN,
-                                    password=cfg.MT5_PASSWORD,
-                                    server=cfg.MT5_SERVER)
+                mt5_path = getattr(cfg, "MT5_PATH", "").strip()
+                if mt5_path and not _os.path.exists(mt5_path):
+                    self.log(
+                        f"❌ MT5 Terminal Path does not exist: {mt5_path}\n"
+                        f"   Open ⚙ Account & Settings and browse to the "
+                        f"correct terminal64.exe for this broker.", "ERROR"
+                    )
+                    self.sig.emit_status("❌  Invalid MT5 path")
+                    return False
+                if mt5_path:
+                    # Explicit terminal path — required when multiple MT5
+                    # installs from different brokers exist on this PC.
+                    # Without this, mt5.initialize() may silently attach
+                    # to the WRONG terminal (e.g. a different broker's
+                    # MT5 that isn't logged into this account at all),
+                    # which surfaces as a misleading -6 "Authorization
+                    # failed" error even though the credentials are correct.
+                    ok = mt5.initialize(path=mt5_path,
+                                        login=cfg.MT5_LOGIN,
+                                        password=cfg.MT5_PASSWORD,
+                                        server=cfg.MT5_SERVER)
+                else:
+                    ok = mt5.initialize(login=cfg.MT5_LOGIN,
+                                        password=cfg.MT5_PASSWORD,
+                                        server=cfg.MT5_SERVER)
             except Exception as e:
                 ok = False
                 last_error = e
@@ -807,19 +843,119 @@ class WatcherThread(threading.Thread):
                 last_error = "account_info() returned None after initialize()"
 
             last_error = last_error or mt5.last_error()
+
+            # Error code -6 = AUTH_FAILED — this is a credentials/login
+            # problem, NOT a transient contention issue. Retrying won't
+            # help; tell the user exactly what to check instead of
+            # spamming the misleading "multiple instances" message.
+            is_auth_error = (
+                isinstance(last_error, tuple) and len(last_error) >= 1
+                and last_error[0] == -6
+            )
+            is_ipc_error = (
+                isinstance(last_error, tuple) and len(last_error) >= 1
+                and last_error[0] == -10004
+            )
+
+            if is_auth_error:
+                has_path  = bool(getattr(cfg, "MT5_PATH", "").strip())
+                path_val  = getattr(cfg, "MT5_PATH", "").strip()
+                # Detect the generic unbranded MetaQuotes install —
+                # this is almost NEVER the right terminal for a real
+                # broker account. Brokers ship their own branded copy
+                # (e.g. "ICMarkets MT5", "Exness MetaTrader 5", etc.)
+                is_generic_path = (
+                    has_path and
+                    "metatrader 5\\terminal64.exe" in path_val.lower().replace("/", "\\")
+                    and "program files\\metatrader 5" in path_val.lower().replace("/", "\\")
+                )
+
+                if is_generic_path:
+                    path_hint = (
+                        f"     5. ⚠️  STRONG SIGNAL OF THE PROBLEM:\n"
+                        f"        Your MT5 Terminal Path is the GENERIC "
+                        f"unbranded MetaTrader 5:\n"
+                        f"          {path_val}\n"
+                        f"        This is almost certainly NOT your "
+                        f"broker's terminal — it is the default install "
+                        f"from metatrader5.com, which has no knowledge "
+                        f"of your broker account at all.\n"
+                        f"        FIX: Find the MT5 shortcut your broker "
+                        f"gave you (often on your Desktop, named after "
+                        f"the broker, e.g. 'ICMarkets MetaTrader 5').\n"
+                        f"        Right-click it → Properties → copy the "
+                        f"'Target' path → paste it into Account & "
+                        f"Settings → MT5 Terminal Path.\n"
+                    )
+                elif not has_path:
+                    path_hint = (
+                        f"     5. ⚠️  No MT5 Terminal Path is set.\n"
+                        f"        If you have MT5 from more than one "
+                        f"broker installed, you MUST set 'MT5 Terminal "
+                        f"Path' in Account & Settings to the exact "
+                        f"terminal64.exe for THIS account's broker.\n"
+                    )
+                else:
+                    path_hint = (
+                        f"     5. MT5 Terminal Path is set to: {path_val}\n"
+                        f"        Double-check this is the broker that "
+                        f"actually owns this account login.\n"
+                    )
+
+                self.log(
+                    f"❌ MT5 login rejected: Authorization failed.\n"
+                    f"   This means your account number, password, or "
+                    f"server name is wrong — NOT a connection issue.\n"
+                    f"   Check in Account & Settings:\n"
+                    f"     1. Account number matches your MT5 login exactly\n"
+                    f"     2. Password is your TRADER password "
+                    f"(not the investor/read-only password)\n"
+                    f"     3. Server name matches EXACTLY what your broker "
+                    f"gave you (e.g. 'ICMarkets-Demo02', not 'ICMarkets-Demo')\n"
+                    f"     4. MT5 terminal app is installed and was logged "
+                    f"in successfully at least once on this PC\n"
+                    f"{path_hint}", "ERROR"
+                )
+                self.sig.emit_status("❌  Login rejected — check credentials")
+                return False
+
             if attempt < MAX_ATTEMPTS:
                 wait_s = min(2 * attempt, 8)
-                self.log(
-                    f"⚠️  MT5 connect attempt {attempt}/{MAX_ATTEMPTS} failed "
-                    f"({last_error}) — retrying in {wait_s}s "
-                    f"(this can happen when multiple bot instances connect "
-                    f"to the same terminal at once)", "WARN"
-                )
+                if is_ipc_error:
+                    self.log(
+                        f"⚠️  MT5 connect attempt {attempt}/{MAX_ATTEMPTS} — "
+                        f"terminal is still starting up, retrying in {wait_s}s "
+                        f"(this is normal on first launch — the broker's "
+                        f"MT5 terminal needs a few seconds to fully load)",
+                        "WARN"
+                    )
+                else:
+                    self.log(
+                        f"⚠️  MT5 connect attempt {attempt}/{MAX_ATTEMPTS} failed "
+                        f"({last_error}) — retrying in {wait_s}s "
+                        f"(this can happen when multiple bot instances connect "
+                        f"to the same terminal at once)", "WARN"
+                    )
                 self._stop_event.wait(wait_s)
                 if self._stop_event.is_set():
                     return False
 
-        self.log(f"❌ MT5 connection failed after {MAX_ATTEMPTS} attempts: "
-                 f"{last_error}", "ERROR")
+        if is_ipc_error:
+            self.log(
+                f"❌ MT5 terminal never finished starting after "
+                f"{MAX_ATTEMPTS} attempts ({last_error}).\n"
+                f"   Try this:\n"
+                f"     1. Manually open your broker's MT5 terminal first\n"
+                f"     2. Log into your account in MT5 directly and wait "
+                f"until you see live prices\n"
+                f"     3. THEN start the bot — it will attach to the "
+                f"already-running terminal instantly\n"
+                f"   If this keeps happening, your antivirus or firewall "
+                f"may be blocking the IPC connection — try temporarily "
+                f"disabling it to confirm.", "ERROR"
+            )
+        else:
+            self.log(f"❌ MT5 connection failed after {MAX_ATTEMPTS} attempts: "
+                     f"{last_error}", "ERROR")
         self.sig.emit_status("❌  MT5 connection failed")
         return False

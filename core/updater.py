@@ -38,10 +38,26 @@ log = logging.getLogger("updater")
 # ── Configuration ─────────────────────────────────────────────────
 # HOST THIS FILE on your server / GitHub / Google Drive public link.
 # Change this URL to wherever you'll put your version.json.
-VERSION_CHECK_URL = "https://raw.githubusercontent.com/YOUR_USERNAME/traderbotv4-releases/main/version.json"
+VERSION_CHECK_URL = "https://raw.githubusercontent.com/radiarkazemi/tradingbot_v4/main/version.json"
 
-# Current app version — bump this with every release.
-APP_VERSION = "4.0.0"
+# Current app version — read from version.json so there's a single
+# source of truth (publish_update.bat updates version.json, this
+# reads it automatically — no need to edit two places).
+def _read_local_version() -> str:
+    try:
+        import json as _json
+        # version.json sits next to the EXE (bundled as a data file)
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        vpath = os.path.join(base, "version.json")
+        if not os.path.exists(vpath):
+            # PyInstaller frozen path
+            vpath = os.path.join(getattr(sys, "_MEIPASS", base), "version.json")
+        with open(vpath, encoding="utf-8") as f:
+            return _json.load(f).get("version", "4.0.0")
+    except Exception:
+        return "4.0.0"
+
+APP_VERSION = _read_local_version()
 
 # How long to wait before giving up on the version check (seconds).
 CHECK_TIMEOUT = 8
@@ -76,9 +92,9 @@ class UpdateChecker(threading.Thread):
                  current_version: str = APP_VERSION):
         super().__init__(daemon=True)
         self._on_available = on_update_available
-        self._on_failed = on_check_failed
-        self._url = check_url
-        self._current = current_version
+        self._on_failed    = on_check_failed
+        self._url          = check_url
+        self._current      = current_version
 
     def run(self):
         try:
@@ -114,20 +130,19 @@ class UpdateDownloader(threading.Thread):
                  on_done: Optional[Callable] = None,
                  on_error: Optional[Callable] = None):
         super().__init__(daemon=True)
-        self._url = url
+        self._url         = url
         self._on_progress = on_progress
-        self._on_done = on_done
-        self._on_error = on_error
-        self._cancelled = False
+        self._on_done     = on_done
+        self._on_error    = on_error
+        self._cancelled   = False
 
     def cancel(self):
         self._cancelled = True
 
     def run(self):
         try:
-            tmp_dir = tempfile.mkdtemp(prefix="tbv4_update_")
-            filename = self._url.split(
-                "/")[-1].split("?")[0] or "TraderBotV4_Update.exe"
+            tmp_dir  = tempfile.mkdtemp(prefix="tbv4_update_")
+            filename = self._url.split("/")[-1].split("?")[0] or "TraderBotV4_Update.exe"
             tmp_path = os.path.join(tmp_dir, filename)
 
             req = urllib.request.Request(
@@ -136,7 +151,7 @@ class UpdateDownloader(threading.Thread):
             )
             with urllib.request.urlopen(req, timeout=60) as resp:
                 total = int(resp.headers.get("Content-Length", 0))
-                done = 0
+                done  = 0
                 chunk = 65536  # 64 KB chunks
                 with open(tmp_path, "wb") as f:
                     while not self._cancelled:
