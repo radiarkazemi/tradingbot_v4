@@ -23,10 +23,8 @@ class ControlPanelMixin:
 
     def _toggle_btn(self, label, tooltip, color_on, handler):
         btn = QPushButton(label)
-        btn.setCheckable(True)
-        btn.setChecked(False)
-        btn.setMinimumHeight(28)
-        btn.setToolTip(tooltip)
+        btn.setCheckable(True); btn.setChecked(False)
+        btn.setMinimumHeight(28); btn.setToolTip(tooltip)
         btn.setStyleSheet(f"""
             QPushButton {{
                 background:#1A2030; color:#4A5568;
@@ -45,11 +43,8 @@ class ControlPanelMixin:
         return btn
 
     def _btn_row(self, a, b, layout):
-        r = QHBoxLayout()
-        r.setSpacing(5)
-        r.addWidget(a)
-        r.addWidget(b)
-        layout.addLayout(r)
+        r = QHBoxLayout(); r.setSpacing(5)
+        r.addWidget(a); r.addWidget(b); layout.addLayout(r)
 
     def _build_ui(self):
         root = QWidget()
@@ -250,8 +245,10 @@ class ControlPanelMixin:
         self.chk_tp_free = self._toggle_btn(
             "🚫  TP-Free",
             "Place all orders WITHOUT a take-profit.\n"
-            "Positions run until manually closed or SL hit.",
-            C["orange"], lambda c: None)
+            "Positions run until manually closed or SL hit.\n"
+            "You can drag a manual TP onto a position any time —\n"
+            "the bot will not touch it while this is ON.",
+            C["orange"], self._on_tp_free_toggled)
         self.chk_follow = self._toggle_btn(
             "📐  Follow Rect",
             "When you drag/resize a rectangle while idle,\n"
@@ -265,7 +262,14 @@ class ControlPanelMixin:
             "On start, scan MT5 for existing bot positions\n"
             "and resume monitoring them without re-entering.",
             C["orange"], lambda c: None)
-        cl.addWidget(self.chk_resume)
+        self.chk_enter_inside = self._toggle_btn(
+            "📍  Enter If Inside",
+            "If price is ALREADY between the rectangle's edges the\n"
+            "moment it registers (hasn't touched an edge yet), enter\n"
+            "immediately instead of waiting for an edge touch that\n"
+            "may never come if price stays inside the box.",
+            C["orange"], lambda c: None)
+        self._btn_row(self.chk_resume, self.chk_enter_inside, cl)
 
         cl.addWidget(_hline())
         cl.addWidget(self._section_label("PROTECTIONS"))
@@ -321,6 +325,16 @@ class ControlPanelMixin:
             "Update your MT5 login, password, server, and default preferences.")
         self.btn_settings.clicked.connect(self._show_settings)
         cl.addWidget(self.btn_settings)
+
+        self.btn_undo = QPushButton("↩️  Undo Last Change")
+        self.btn_undo.setMinimumHeight(30)
+        self.btn_undo.setToolTip(
+            "Restore rectangle, SL, TP, lots, round/touch counters, and\n"
+            "protection toggles to the state from ~30 seconds ago.\n"
+            "A snapshot is auto-saved every 30s while the bot runs.\n"
+            "Useful if a manual drag or settings change went wrong.")
+        self.btn_undo.clicked.connect(self._on_undo_clicked)
+        cl.addWidget(self.btn_undo)
 
         vl.addWidget(grp_ctrl)
 

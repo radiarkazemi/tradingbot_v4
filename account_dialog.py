@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QDoubleSpinBox, QComboBox, QWidget, QTabWidget,
     QFrame, QCheckBox, QScrollArea, QSpinBox, QSizePolicy,
-    QGroupBox, QFormLayout, QGridLayout,
+    QGroupBox, QFormLayout, QGridLayout, QMessageBox,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -260,6 +260,15 @@ class AccountDialog(QDialog):
         btn_browse.clicked.connect(self._browse_mt5_path)
         path_row.addWidget(btn_browse)
         vl.addLayout(path_row)
+
+        btn_detect = QPushButton("🔍  Auto-Detect Installed MT5 Terminals")
+        btn_detect.setMinimumHeight(28)
+        btn_detect.setToolTip(
+            "Scans your PC for all installed MT5 terminals and lets you\n"
+            "pick the correct one for this account's broker — no manual\n"
+            "browsing needed.")
+        btn_detect.clicked.connect(self._detect_mt5_terminals)
+        vl.addWidget(btn_detect)
         vl.addSpacing(4)
 
         self.err_lbl = QLabel("")
@@ -459,6 +468,44 @@ class AccountDialog(QDialog):
         )
         if path:
             self.inp_mt5_path.setText(path)
+
+    def _detect_mt5_terminals(self):
+        from core.mt5_detector import find_all_mt5_terminals, is_generic_metaquotes_path
+        from PyQt5.QtWidgets import QInputDialog
+
+        terminals = find_all_mt5_terminals()
+        if not terminals:
+            QMessageBox.information(
+                self, "No MT5 Terminals Found",
+                "Could not find any installed MT5 terminals in the usual "
+                "locations.\n\nIf MT5 is installed somewhere unusual, "
+                "use the '...' Browse button instead.")
+            return
+
+        if len(terminals) == 1:
+            t = terminals[0]
+            self.inp_mt5_path.setText(t["path"])
+            QMessageBox.information(
+                self, "MT5 Terminal Found",
+                f"Found one MT5 terminal:\n\n{t['broker']}\n{t['path']}\n\n"
+                f"Path has been filled in automatically.")
+            return
+
+        # Multiple terminals — let the user pick
+        labels = []
+        for t in terminals:
+            tag = " ⚠️ (generic/unbranded)" if is_generic_metaquotes_path(t["path"]) else ""
+            labels.append(f"{t['broker']}{tag}  —  {t['path']}")
+
+        choice, ok = QInputDialog.getItem(
+            self, "Multiple MT5 Terminals Found",
+            f"Found {len(terminals)} MT5 terminals on this PC.\n"
+            f"Select the one that belongs to THIS account's broker:",
+            labels, 0, False
+        )
+        if ok and choice:
+            idx = labels.index(choice)
+            self.inp_mt5_path.setText(terminals[idx]["path"])
 
     # ── Load / Save ───────────────────────────────────────────────
 

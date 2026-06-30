@@ -16,7 +16,6 @@ from .theme import C, SS
 from .widgets import Sig, Sparkline, _stat_card, _vline, _hline
 from .shared_imports import *
 
-
 class HandlersMixin:
     def _start(self):
         sym = self.sym_combo.currentText().strip() or WATCH_SYMBOL
@@ -45,6 +44,7 @@ class HandlersMixin:
             entry_filter_ob_fvg=self.chk_entry_filter.isChecked(),
             partial_exit_r3=self.chk_partial_exit.isChecked(),
             trailing_sl=self.chk_trailing.isChecked(),
+            enter_if_inside=self.chk_enter_inside.isChecked(),
         )
         self._worker.sig.on_log(lambda m, l: self._sig.log_line.emit(m, l))
         self._worker.sig.on_status(lambda s:    self._sig.status.emit(s))
@@ -53,6 +53,13 @@ class HandlersMixin:
         # ← NEW: wire balance TP signal so GUI can stop all watchers cleanly
         self._worker.sig.on_stop(lambda:      self._sig.balance_tp.emit())
         self._worker.start()
+
+        # ── Start auto-snapshot for Undo (every 30s) ────────────────
+        from core.undo_manager import undo_manager
+        undo_manager.start(
+            get_sources_fn=lambda: self._worker._sources if self._worker else {},
+            log_fn=lambda m, l: self._sig.log_line.emit(m, l),
+        )
 
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -139,8 +146,26 @@ class HandlersMixin:
                     "WARN"
                 )
 
+    def _on_undo_clicked(self):
+        """Restore the previous auto-saved snapshot (~30s ago)."""
+        from core.undo_manager import undo_manager
+        if not self._worker:
+            self._sig.log_line.emit(
+                "⚠️  Undo requires the bot to be running", "WARN")
+            return
+        if not undo_manager.can_undo():
+            self._sig.log_line.emit(
+                "⚠️  Not enough history yet — wait at least 30s after "
+                "starting before using Undo", "WARN")
+            return
+        undo_manager.undo()
+
     def _stop(self):
         """Stop all watchers cleanly in the correct order."""
+        # Stop undo auto-snapshot timer
+        from core.undo_manager import undo_manager
+        undo_manager.stop()
+
         # Confluence first (re-enables OB/FVG draw_on_chart)
         self._stop_confluence()
         if self._amd_worker:
@@ -681,8 +706,7 @@ class HandlersMixin:
         max1 = t1[-1]
         max2 = t2[-1]
         step1 = round(t1[2] - t1[1], 2) if len(t1) > 2 else round(base_lot, 2)
-        step2 = round(
-            t2[3] - t2[2], 2) if len(t2) > 3 else round(base_lot * 2, 2)
+        step2 = round(t2[3] - t2[2], 2) if len(t2) > 3 else round(base_lot * 2, 2)
 
         prev_idx = self.lot_mode_combo.currentIndex()
         self.lot_mode_combo.blockSignals(True)
@@ -729,7 +753,7 @@ class HandlersMixin:
             for src in self._worker._sources.values():
                 src._trailing_enabled = checked
                 if not checked:
-                    src._trailing_buy_floor = 0.0
+                    src._trailing_buy_floor  = 0.0
                     src._trailing_sell_floor = 0.0
         msg = (
             "📈  Trailing SL ENABLED — SL follows price after R2 locks"
@@ -749,6 +773,22 @@ class HandlersMixin:
             "📤  Partial Exit (R3) ENABLED — closes 70% at TP, keeps 30% running"
             if checked else
             "📤  Partial Exit (R3) DISABLED"
+        )
+        self._sig.log_line.emit(msg, "NEW" if checked else "INFO")
+
+    def _on_tp_free_toggled(self, checked: bool):
+        """Toggle TP-Free mode live on the running watcher."""
+        import config as _cfg
+        _cfg.TP_FREE_MODE = checked
+        if self._worker:
+            self._worker._tp_free = checked
+            for src in self._worker._sources.values():
+                src.tp_free = checked
+        msg = (
+            "🚫  TP-Free ENABLED — orders place without TP, drag a manual "
+            "TP any time and the bot will keep it"
+            if checked else
+            "🚫  TP-Free DISABLED — bot resumes managing TP automatically"
         )
         self._sig.log_line.emit(msg, "NEW" if checked else "INFO")
 

@@ -120,13 +120,26 @@ class _HelpersMixin:
             return False
 
     def _move_position_tp(self, ticket: int, new_tp: float) -> bool:
-        """Modify an open position's TP via TRADE_ACTION_SLTP, keeping
-        its current SL untouched."""
+        """
+        Modify an open position's TP via TRADE_ACTION_SLTP, keeping
+        its current SL untouched.
+
+        Handles MT5 retcode 10025 ("No changes") gracefully, the same
+        way _move_position_sl does: if the position's TP already
+        matches new_tp, treat it as success rather than logging a
+        spurious "resync failed" warning every scan.
+        """
         try:
             pos = next((p for p in (mt5.positions_get(symbol=self.symbol) or [])
                        if p.ticket == ticket), None)
             if not pos:
                 return False
+
+            digits    = getattr(mt5.symbol_info(self.symbol), "digits", 5)
+            tolerance = 10 ** -digits
+            if abs(pos.tp - new_tp) < tolerance:
+                return True  # already at target
+
             res = mt5.order_send({
                 "action":   mt5.TRADE_ACTION_SLTP,
                 "symbol":   self.symbol,
@@ -141,9 +154,20 @@ class _HelpersMixin:
                     f"{new_tp:.5f} (balance-target gap update)", "INFO"
                 )
                 return True
+
+            if res and res.retcode == 10025:
+                import time as _t
+                _t.sleep(0.1)
+                pos2 = next((p for p in (mt5.positions_get(symbol=self.symbol) or [])
+                             if p.ticket == ticket), None)
+                if pos2 and abs(pos2.tp - new_tp) < tolerance:
+                    return True
+                return False
+
             self._log(
                 f"⚠️  [{self.name[:20]}] TP resync failed for #{ticket}: "
-                f"{getattr(res, 'comment', 'unknown error')}", "WARN"
+                f"{getattr(res, 'comment', res.retcode if res else 'no response')}",
+                "WARN"
             )
             return False
         except Exception as e:

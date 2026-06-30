@@ -239,7 +239,8 @@ class WatcherThread(threading.Thread):
                  soft_lot_mode: int = 1, tp_free: bool = False,
                  entry_filter_ob_fvg: bool = False,
                  partial_exit_r3: bool = False,
-                 trailing_sl: bool = False):
+                 trailing_sl: bool = False,
+                 enter_if_inside: bool = False):
         super().__init__(daemon=True)
         self.symbol = symbol
         self.lot_size = lot_size
@@ -253,6 +254,7 @@ class WatcherThread(threading.Thread):
         self._entry_filter_ob_fvg = entry_filter_ob_fvg
         self._partial_exit_r3     = partial_exit_r3
         self._trailing_sl         = trailing_sl
+        self._enter_if_inside     = enter_if_inside
         self.sig = WatcherSignals()
         self._stop_event = threading.Event()
         self._sources: dict[str, SourceState] = {}
@@ -587,13 +589,34 @@ class WatcherThread(threading.Thread):
                     # tick after registration can't be misread as a
                     # "crossing" from an unset baseline.
                     if tick:
-                        state._prev_tick_price = (tick.bid + tick.ask) / 2
+                        state._prev_tick_price = tick.ask
                     self._sources[n] = state
                     self._seen.add(n)
-                    self.log(
-                        f"🆕  [{n[:25]}] rect=[{o.rect_bottom:.5f}-{o.rect_top:.5f}] "
-                        f"registered | waiting for touch"
-                    )
+
+                    # ── Enter-if-inside-rectangle option ────────────
+                    # If enabled and price is ALREADY between the
+                    # rectangle's edges at the moment it registers
+                    # (not yet touched an edge), place the order pair
+                    # immediately instead of waiting for an edge touch
+                    # that may never happen if price stays inside.
+                    entered_immediately = False
+                    if (self._enter_if_inside and tick
+                            and o.rect_bottom < tick.ask < o.rect_top):
+                        self.log(
+                            f"🎯  [{n[:25]}] price already inside rectangle "
+                            f"at registration (ask={tick.ask:.5f}, "
+                            f"rect=[{o.rect_bottom:.5f}-{o.rect_top:.5f}]) "
+                            f"— entering immediately (Enter-If-Inside ON)",
+                            "NEW"
+                        )
+                        state.place_initial_pair()
+                        entered_immediately = True
+
+                    if not entered_immediately:
+                        self.log(
+                            f"🆕  [{n[:25]}] rect=[{o.rect_bottom:.5f}-{o.rect_top:.5f}] "
+                            f"registered | waiting for touch"
+                        )
 
                 # ── Removed lines (with grace period) ─────────────
                 # A line must be absent for REMOVAL_GRACE consecutive scans

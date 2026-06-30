@@ -27,10 +27,12 @@ class _EntryMixin:
         if price has touched either edge of the rectangle since the
         last tick we saw.
 
-        Detects a touch two ways, against EITHER edge (rect_top or
-        rect_bottom):
+        Uses the ASK price as the reference (not the bid/ask midpoint)
+        — this is the price you'd actually transact at for a BUY, and
+        is the more conservative/realistic touch reference since it's
+        always >= bid. Detects a touch two ways, against EITHER edge:
           1. Direct straddle: bid <= edge <= ask right now
-          2. Crossing: the mid price moved from one side of an edge
+          2. Crossing: the ask price moved from one side of an edge
              to the other between the previous tick and this one
              (catches fast moves where price jumps over an edge
              between two ticks without ever exactly straddling it)
@@ -44,8 +46,6 @@ class _EntryMixin:
         if bid <= 0 or ask <= 0:
             return False
 
-        mid = (bid + ask) / 2
-
         touched = False
         desc = ""
 
@@ -56,12 +56,12 @@ class _EntryMixin:
                 break
             if self._prev_tick_price is not None:
                 prev = self._prev_tick_price
-                if (prev < edge <= mid) or (mid <= edge < prev):
+                if (prev < edge <= ask) or (ask <= edge < prev):
                     touched = True
-                    desc = f"{edge_name} crossed {prev:.5f}→{mid:.5f}"
+                    desc = f"{edge_name} crossed {prev:.5f}→{ask:.5f} (ask)"
                     break
 
-        self._prev_tick_price = mid
+        self._prev_tick_price = ask
 
         if touched:
             height = self.rect_top - self.rect_bottom

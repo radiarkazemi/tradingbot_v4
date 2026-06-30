@@ -256,6 +256,52 @@ def send_pair(orders: list, symbol: str) -> list:
     return results
 
 
+def place_single_pending(symbol: str, is_buy: bool, entry: float,
+                          sl: float, tp: float, lot: float,
+                          comment: str = "TB4_Undo") -> int:
+    """
+    Place ONE pending stop order (BUY_STOP or SELL_STOP).
+
+    Used by the Undo system to recreate a pending order that was
+    cancelled (e.g. by the opposite-leg auto-cancel after R1/R2
+    locks, or manually by the trader) so Undo can fully restore the
+    pre-change state, not just adjust SL/TP on positions that still
+    exist.
+
+    Returns the new order ticket on success, or 0 on failure.
+    """
+    from config import MAGIC_NUMBER
+    try:
+        filling = _filling_mode(symbol)
+        order_type = mt5.ORDER_TYPE_BUY_STOP if is_buy else mt5.ORDER_TYPE_SELL_STOP
+        request = {
+            "action":       mt5.TRADE_ACTION_PENDING,
+            "symbol":       symbol,
+            "volume":       lot,
+            "type":         order_type,
+            "price":        _round_price(entry, symbol),
+            "sl":           _round_price(sl, symbol),
+            "tp":           _round_price(tp, symbol) if tp else 0.0,
+            "deviation":    20,
+            "magic":        MAGIC_NUMBER,
+            "comment":      comment,
+            "type_time":    mt5.ORDER_TIME_GTC,
+            "type_filling": filling,
+        }
+        res = mt5.order_send(request)
+        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+            log.info("✅  Undo: recreated %s order #%d @ %.5f",
+                     "BUY_STOP" if is_buy else "SELL_STOP",
+                     res.order, entry)
+            return res.order
+        log.warning("⚠️  Undo: failed to recreate pending order: %s",
+                    getattr(res, "comment", res.retcode if res else "no response"))
+        return 0
+    except Exception as e:
+        log.warning("Undo: place_single_pending error: %s", e)
+        return 0
+
+
 def cancel_order(ticket: int) -> bool:
     res = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
     ok  = res and res.retcode == mt5.TRADE_RETCODE_DONE
