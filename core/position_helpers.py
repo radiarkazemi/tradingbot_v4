@@ -396,8 +396,15 @@ class _HelpersMixin:
         that restarting the bot mid-cycle continues from the correct
         lot rather than resetting to base_lot.
 
-        Returns True if counters were restored, False if no matching
-        session file exists (caller should use fresh defaults).
+        GATED BY THE RESUME TOGGLE: if the user has Resume Session
+        turned OFF, this returns False unconditionally — a fresh
+        start truly means lot 1 / round 1 / cumulative_loss $0, no
+        exceptions. The Resume toggle is the single, explicit signal
+        the user has for "continue where I left off" vs "start over".
+
+        Returns True if counters were restored, False if Resume is
+        off, or no matching session file exists (caller uses fresh
+        defaults in either case).
 
         This is intentionally narrow — it ONLY restores counters, never
         live MT5 positions or order tickets. Full position/order resume
@@ -407,6 +414,9 @@ class _HelpersMixin:
         where positions already closed but the rectangle is being
         re-touched on the next fresh entry after a bot restart.
         """
+        if not getattr(self, "_resume_enabled", False):
+            return False
+
         try:
             from core.resume import session_file
             import json, os

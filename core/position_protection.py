@@ -854,16 +854,12 @@ class _ProtectionMixin:
         if (buy_pos and self.risk_free_applied.get("buy", False)
                 and not self.loss_free_applied.get("buy", False)):
             pos = sorted(buy_pos, key=lambda p: p.time, reverse=True)[0]
-            # New SL = current_price - step, but never below the R2 floor
-            r2_floor = getattr(self, "_trailing_buy_floor", pos.sl)
-            # Store floor from R2 lock on first trailing tick
-            if not hasattr(self, "_trailing_buy_floor") or self._trailing_buy_floor == 0:
+            if not getattr(self, "_trailing_buy_floor", 0.0):
                 self._trailing_buy_floor = pos.sl
-                r2_floor = pos.sl
+            r2_floor   = self._trailing_buy_floor
             desired_sl = pos.price_current - step
-            # Only move SL UP (in profit direction), never down
-            if desired_sl > pos.sl + self.pip_size * 0.5:
-                new_sl = _round_price(max(desired_sl, r2_floor), self.symbol)
+            if desired_sl > pos.sl + self.pip_size * 0.5 and desired_sl > r2_floor:
+                new_sl = _round_price(desired_sl, self.symbol)
                 if self._move_position_sl(pos.ticket, new_sl):
                     self._log(
                         f"📈  [{self.name[:20]}] BUY trailing SL → {new_sl:.5f} "
@@ -875,15 +871,12 @@ class _ProtectionMixin:
         if (sell_pos and self.risk_free_applied.get("sell", False)
                 and not self.loss_free_applied.get("sell", False)):
             pos = sorted(sell_pos, key=lambda p: p.time, reverse=True)[0]
-            # For SELL: SL above entry. Trailing moves SL DOWN as price drops.
-            r2_floor = getattr(self, "_trailing_sell_floor", pos.sl)
-            if not hasattr(self, "_trailing_sell_floor") or self._trailing_sell_floor == 0:
+            if not getattr(self, "_trailing_sell_floor", 0.0):
                 self._trailing_sell_floor = pos.sl
-                r2_floor = pos.sl
+            r2_floor   = self._trailing_sell_floor
             desired_sl = pos.price_current + step
-            # Only move SL DOWN (in profit direction for SELL), never up
-            if desired_sl < pos.sl - self.pip_size * 0.5:
-                new_sl = _round_price(min(desired_sl, r2_floor), self.symbol)
+            if desired_sl < pos.sl - self.pip_size * 0.5 and desired_sl < r2_floor:
+                new_sl = _round_price(desired_sl, self.symbol)
                 if self._move_position_sl(pos.ticket, new_sl):
                     self._log(
                         f"📈  [{self.name[:20]}] SELL trailing SL → {new_sl:.5f} "

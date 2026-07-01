@@ -361,7 +361,8 @@ class WatcherThread(threading.Thread):
         current_balance = acct.balance if acct else 0.0
 
         import json as _json
-        _bal_file = f"start_balance_{self.symbol}.json"
+        from core.resume import start_balance_file
+        _bal_file = start_balance_file(self.symbol)
 
         if self._resume_enabled and _os.path.exists(_bal_file):
             try:
@@ -582,6 +583,7 @@ class WatcherThread(threading.Thread):
                         entry_filter_ob_fvg=self._entry_filter_ob_fvg,
                         partial_exit_r3=self._partial_exit_r3,
                         trailing_sl=self._trailing_sl,
+                        resume_enabled=self._resume_enabled,
                     )
                     state.registered_at = cur_t
                     state.last_prev_t = prev_t
@@ -708,6 +710,7 @@ class WatcherThread(threading.Thread):
                                 loss_free_enabled=self._loss_free_enabled,
                                 soft_lot_mode=self._soft_lot_mode,
                                 tp_free=self._tp_free,
+                                resume_enabled=self._resume_enabled,
                             )
                             new_state.registered_at = cur_t
                             new_state.last_prev_t = prev_t

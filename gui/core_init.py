@@ -160,17 +160,35 @@ class CoreInitMixin:
     # ── Tunnel URL watcher ───────────────────────────────────────
 
     def _start_tunnel_url_watcher(self):
-        """Watch for Cloudflare tunnel URL and show it in the GUI log."""
+        """Watch for ngrok tunnel URL and show it in the GUI log."""
         def _watch():
             try:
                 from core.tunnel import tunnel as _t
-                url = _t.wait_for_url(timeout=20.0)
+                url = _t.wait_for_url(timeout=40.0)
                 if url:
                     self._sig.log_line.emit(
                         f"🌐  Remote Access ready\n"
                         f"   URL: {url}\n"
                         f"   Key: see %APPDATA%\\TraderBotV4\\api_key.txt",
                         "NEW"
+                    )
+                elif getattr(_t, "_needs_auth", False):
+                    self._sig.log_line.emit(
+                        "🌐  Remote access needs setup:\n"
+                        "   ngrok requires a free account. Steps:\n"
+                        "   1. Sign up at https://ngrok.com (free)\n"
+                        "   2. Copy your authtoken from the dashboard\n"
+                        "   3. Paste into: %APPDATA%\\TraderBotV4\\ngrok_token.txt\n"
+                        "   4. Restart the bot",
+                        "WARN"
+                    )
+                else:
+                    self._sig.log_line.emit(
+                        "🌐  Remote access: tunnel URL not received.\n"
+                        "   Check console for details. If firewall is blocking,\n"
+                        "   try adding authtoken from ngrok.com to:\n"
+                        "   %APPDATA%\\TraderBotV4\\ngrok_token.txt",
+                        "WARN"
                     )
             except Exception:
                 pass

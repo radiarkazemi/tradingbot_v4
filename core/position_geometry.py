@@ -158,9 +158,12 @@ class _GeometryMixin:
         except Exception:
             pass
 
-        # Last resort: use cached value from a real closed SL, normalised to lot
+        # Last resort: use cached value from a real closed SL.
+        # _pip_value_per_base_lot is $/pip at base_lot (0.01).
+        # Scale correctly: dpp(lot) = calibrated * (lot / base_lot)
         if getattr(self, '_pip_value_per_base_lot', 0.0) > 0:
-            return self._pip_value_per_base_lot * lot
+            base = getattr(self, 'base_lot', 0.01) or 0.01
+            return self._pip_value_per_base_lot * (lot / base)
         return 0.0
 
     def _calibrate_pip_value(self, closed_dollar_loss: float, closed_lot: float):

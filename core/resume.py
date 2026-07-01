@@ -33,14 +33,12 @@ def session_file(symbol: str) -> str:
     the installer and shared between users/machines. Each machine
     has its own session state tied to its own %APPDATA% folder.
     """
-    import platform
-    import os
+    import platform, os
     if platform.system() == "Windows":
         base = os.environ.get("APPDATA", os.path.expanduser("~"))
         folder = os.path.join(base, "TraderBotV4", "sessions")
     else:
-        folder = os.path.join(os.path.expanduser("~"),
-                              ".traderbotv4", "sessions")
+        folder = os.path.join(os.path.expanduser("~"), ".traderbotv4", "sessions")
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, f"session_{symbol}.json")
 
@@ -77,15 +75,39 @@ def save_session(state: SourceState):
         log.warning("Could not save session: %s", e)
 
 
+def start_balance_file(symbol: str) -> str:
+    """
+    Same %APPDATA% convention as session_file() — stores the saved
+    start balance for the Resume-Session feature, never in the app's
+    working directory.
+    """
+    import platform
+    if platform.system() == "Windows":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        folder = os.path.join(base, "TraderBotV4", "sessions")
+    else:
+        folder = os.path.join(os.path.expanduser("~"), ".traderbotv4", "sessions")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, f"start_balance_{symbol}.json")
+
+
 def clear_session(symbol: str):
-    """Delete session file when sequence completes cleanly."""
-    path = session_file(symbol)
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-            log.info("Session file cleared")
-    except Exception:
-        pass
+    """
+    Delete the rectangle session file (round/touch/lot/cumulative_loss
+    state) AND the saved start-balance file when a cycle completes
+    cleanly (Balance TP hit, hard stop-loss, or manual full reset).
+
+    This guarantees the NEXT bot start — even with Resume Session
+    turned off — never accidentally restores stale mid-cycle progress
+    from a session that has already genuinely finished.
+    """
+    for path in (session_file(symbol), start_balance_file(symbol)):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                log.info("Cleared %s", path)
+        except Exception:
+            pass
 
 
 def scan_and_resume(symbol: str, pip_size: float, base_lot: float,

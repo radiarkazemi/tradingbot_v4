@@ -62,7 +62,8 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                  soft_lot_mode=1, tp_free=False,
                  entry_filter_ob_fvg=False,
                  partial_exit_r3=False,
-                 trailing_sl=False):
+                 trailing_sl=False,
+                 resume_enabled=False):
         self.name          = name
         # Fixed rectangle edges — NEVER move after registration. This
         # is the "distance" now: rect_top - rect_bottom. (item 5/11)
@@ -82,6 +83,7 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
         self._entry_filter_ob_fvg   = entry_filter_ob_fvg
         self._partial_exit_r3_enabled = partial_exit_r3
         self._trailing_enabled        = trailing_sl
+        self._resume_enabled         = resume_enabled
         self._trailing_enabled        = False
         self._trailing_buy_floor      = 0.0
         self._trailing_sell_floor     = 0.0
@@ -419,6 +421,13 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
         # leave a small gap between where the position actually closed
         # and where the new order sits, adding delay before it can
         # trigger again.
+        # If the OPPOSITE side (SELL) already has R1/R2 locked, don't
+        # start a new recovery from the BUY closing.
+        sell_already_locked = (
+            self.risk_free_applied.get("sell", False) or
+            self.loss_free_applied.get("sell", False)
+        )
+
         if (self.buy_pos_ticket
                 and self.buy_pos_ticket not in open_tickets
                 and self._buy_confirmed):
@@ -462,6 +471,15 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                 )
                 self.needs_full_reset = True
                 self.reset()
+            elif sell_already_locked:
+                # SELL side has R1/R2 locked — don't start a new BUY
+                # recovery; reset cleanly.
+                self._log(
+                    f"🟢  [{self.name[:20]}] BUY closed but SELL side "
+                    f"already locked (R1/R2) — resetting to IDLE", "NEW"
+                )
+                self.needs_full_reset = True
+                self.reset()
             else:
                 # SL hit (or unknown) — accumulate real loss and
                 # calibrate pip value from the real close, then recover.
@@ -470,6 +488,14 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                     self.cumulative_loss += real_loss
                     self._calibrate_pip_value(real_loss, self.buy_lot)
                 self._place_new_buy_stop(anchor_price=close_price)
+
+        # If the OPPOSITE side (BUY) already has R1/R2 locked, don't
+        # start a new recovery from the SELL closing — that cycle is
+        # already decided. Reset instead.
+        buy_already_locked = (
+            self.risk_free_applied.get("buy", False) or
+            self.loss_free_applied.get("buy", False)
+        )
 
         if (self.sell_pos_ticket
                 and self.sell_pos_ticket not in open_tickets
@@ -499,6 +525,16 @@ class SourceState(_GeometryMixin, _EntryMixin, _HelpersMixin,
                 self._log(
                     f"🏆  [{self.name[:20]}] SELL hit TP — round won, "
                     f"resetting to IDLE", "NEW"
+                )
+                self.needs_full_reset = True
+                self.reset()
+            elif buy_already_locked:
+                # BUY side has R1/R2 locked — the cycle is already
+                # decided by that side. Don't start a new SELL
+                # recovery; just reset cleanly.
+                self._log(
+                    f"🔴  [{self.name[:20]}] SELL closed but BUY side "
+                    f"already locked (R1/R2) — resetting to IDLE", "NEW"
                 )
                 self.needs_full_reset = True
                 self.reset()
